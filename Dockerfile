@@ -11,7 +11,9 @@ COPY server/ server/
 USER 10001
 
 # Config via env: HOTDATA_API_KEY (required), HOTUSAGE_INGEST_TOKEN (required
-# outside dev), HOTDATA_WORKSPACE / HOTDATA_API_HOST optional overrides.
+# outside dev; its value is not itself a credential unless
+# HOTUSAGE_ALLOW_SHARED_INGEST=1), HOTDATA_WORKSPACE / HOTDATA_API_HOST
+# optional overrides.
 
 # This image only ever runs behind App Runner, which rewrites X-Forwarded-For,
 # so the rate limiter may believe it here. A bare `python3 server.py` gets the

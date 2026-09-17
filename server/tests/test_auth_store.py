@@ -85,7 +85,9 @@ class StatefulSysDb:
             "device_codes": ("device_code",), "device_scopes": ("device_code",),
             "collector_tokens": ("token",), "token_scopes": ("token",),
             "collector_token_usage": ("token",), "auth_sessions": ("token",),
-            "system_admins": ("email",)}
+            "system_admins": ("email",), "invites": ("token",),
+            "team_invites": ("token",),
+            "email_verifications": ("token",), "verified_emails": ("email",)}
 
     def __init__(self, db="dbidsystem00000000000000"):
         self.db = db
@@ -106,8 +108,8 @@ class StatefulSysDb:
             r["database_id"] = org["database_id"] if org else None
             return r
 
-        if table == "users" and "LEFT JOIN" in flat:   # get_user
-            out = [with_org(r) for r in out]
+        if table in ("users", "invites", "team_invites") and "LEFT JOIN" in flat:
+            out = [with_org(r) for r in out]   # get_user / get_invite / get_team_invite
         # user_for_token: session -> user -> org, in one read
         if table == "auth_sessions" and "JOIN" in flat:
             by_email = {u["email"]: u for u in self.tables["users"]}
@@ -478,6 +480,119 @@ def test_removing_a_member_revokes_their_read_token_too():
     assert db.tables["token_scopes"] == [], db.tables["token_scopes"]
     assert auth.read_viewer(token) is None, "a removed member reads nothing"
     print("    bob removed, his read token is dead")
+
+
+def test_an_org_admin_cannot_delete_a_platform_operator():
+    """Removing someone whose only org is yours deletes their account, and
+    remove_user also strips the system-admin grant. An org admin must not be
+    able to do that to a platform operator; the CLI's deluser still can."""
+    print("an org admin removing a platform operator:")
+    auth, db = scoped_store()
+    auth.create_account("ops@x.dev", "hunter2hunter2")
+    auth.join_org("ops@x.dev", "acme-inc")
+    auth.set_system_admin("ops@x.dev")
+    refuses(lambda: auth.remove_from_org("ops@x.dev", "acme-inc"), "platform operator")
+    assert auth.get_user("ops@x.dev"), "the account survives"
+    assert auth.is_system_admin("ops@x.dev"), "and so does the grant"
+    # a plain member on the same path is still removed outright
+    auth.create_account("bob@x.dev", "hunter2hunter2")
+    auth.join_org("bob@x.dev", "acme-inc")
+    auth.remove_from_org("bob@x.dev", "acme-inc")
+    assert auth.get_user("bob@x.dev") is None, "an ordinary member is removed"
+    print("    refused; an ordinary member on the same path is still removed")
+
+
+def verifying_store():
+    """A store with verification ON and one verified admin, ada, in acme-inc."""
+    auth, db = signup_store()
+    auth.verification = True
+    auth.create_account("ada@x.dev", "hunter2hunter2")
+    auth.mark_verified("ada@x.dev")
+    auth.create_org_for("ada@x.dev", "Acme Inc")
+    return auth, db
+
+
+def test_a_new_account_is_unverified_until_its_link_is_opened_signed_in():
+    """The link proves the mailbox only together with the session: whoever
+    registered the address holds the password, and the link lands in the
+    mailbox regardless of who that was."""
+    print("verification:")
+    auth, db = verifying_store()
+    auth.create_account("bob@x.dev", "hunter2hunter2")
+    assert not auth.is_verified("bob@x.dev"), "a fresh account is a claim"
+    token = auth.start_verification("bob@x.dev")
+    assert auth.consume_verification(token, as_user="ada@x.dev") is None, \
+        "someone else's session must not verify it"
+    assert not auth.is_verified("bob@x.dev")
+    assert auth.consume_verification(token, as_user="bob@x.dev") == "bob@x.dev"
+    assert auth.is_verified("bob@x.dev"), "verified once opened as bob"
+    assert db.tables["email_verifications"] == [], "the link is spent"
+    assert auth.consume_verification(token, as_user="bob@x.dev") is None
+    print("    unverified -> wrong session refused -> right session verified -> spent")
+
+
+def test_an_unverified_address_can_be_registered_over():
+    """Squatting: an attacker registers ceo@corp first. With the row a claim
+    rather than an account, the owner registers over it, the attacker's
+    sessions die, and only the owner (holding the mailbox AND the new
+    password) can complete verification."""
+    print("re-registering an unverified address:")
+    auth, db = verifying_store()
+    auth.create_account("ceo@corp.dev", "attackerpass")
+    squatter = auth.login("ceo@corp.dev", "attackerpass")
+    assert auth.user_for_token(squatter), "the squatter is signed in"
+    auth.create_account("ceo@corp.dev", "ownerpassword")
+    assert auth.user_for_token(squatter) is None, "the squatter's session is gone"
+    assert auth.login("ceo@corp.dev", "attackerpass") is None, "old password dead"
+    assert auth.login("ceo@corp.dev", "ownerpassword"), "the owner signs in"
+    auth.mark_verified("ceo@corp.dev")
+    refuses(lambda: auth.create_account("ceo@corp.dev", "attackagain"), "already registered")
+    print("    taken over, squatter signed out; verified, it is an account nobody can take")
+
+
+def test_a_team_link_joiner_is_a_member_but_unverified():
+    """The domain restriction on a team link is only worth anything because of
+    this: joining with a made-up @corp address gives a membership that grants
+    nothing until the mailbox confirms it."""
+    print("a team-link joiner:")
+    auth, db = verifying_store()
+    link = auth.create_team_invite("acme-inc", "ada@x.dev", domain="x.dev")
+    auth.accept_team_invite(link, "mallory@x.dev", "hunter2hunter2")
+    assert "acme-inc" in auth.memberships("mallory@x.dev"), "a member on paper"
+    assert not auth.is_verified("mallory@x.dev"), "but not verified"
+    # and the real mallory can take the claim over through the same link
+    auth.accept_team_invite(link, "mallory@x.dev", "therealone1")
+    assert auth.login("mallory@x.dev", "therealone1")
+    assert auth.login("mallory@x.dev", "hunter2hunter2") is None
+    print("    member, unverified; the address can still be claimed by its owner")
+
+
+def test_accounts_older_than_the_requirement_are_trusted():
+    print("grandfathering:")
+    auth, db = verifying_store()
+    auth.create_account("old@x.dev", "hunter2hunter2")
+    for u in db.tables["users"]:
+        if u["email"] == "old@x.dev":
+            u["created_at"] = "2026-01-01T00:00:00+00:00"
+    assert auth.is_verified("old@x.dev"), "an account from before the cutoff needs no link"
+    auth.verification = False
+    auth.create_account("any@x.dev", "hunter2hunter2")
+    assert auth.is_verified("any@x.dev"), "with verification off everyone is trusted"
+    print("    pre-cutoff account trusted; verification off trusts everyone")
+
+
+def test_removing_a_user_forgets_their_verification():
+    print("a removed user's verification does not outlive them:")
+    auth, db = verifying_store()
+    auth.create_account("bob@x.dev", "hunter2hunter2")
+    auth.mark_verified("bob@x.dev")
+    assert auth.is_verified("bob@x.dev")
+    auth.remove_user("bob@x.dev")
+    assert [r["email"] for r in db.tables["verified_emails"]] == ["ada@x.dev"], \
+        db.tables["verified_emails"]
+    auth.create_account("bob@x.dev", "hunter2hunter2")
+    assert not auth.is_verified("bob@x.dev"), "whoever registers the address next starts over"
+    print("    row and cache gone; a re-registration is unverified")
 
 
 def test_the_admin_listing_hands_out_no_collector_token():

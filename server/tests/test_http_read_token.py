@@ -154,6 +154,69 @@ def test_the_read_token_cannot_ingest():
     print(f"    {status} POST /ingest with an ingest token")
 
 
+def test_the_shared_token_is_not_a_credential_by_default():
+    """The shared HOTUSAGE_INGEST_TOKEN only admits: anyone holding it could
+    report as any registered address in any organization. So by default it is
+    the switch that requires a token, not a token, and only
+    HOTUSAGE_ALLOW_SHARED_INGEST=1 (Handler.allow_shared) changes that."""
+    print("the shared ingest token:")
+    body = {"user_email": "ada@x.dev", "hostname": "laptop", "sessions": []}
+    status, raw = call(BASE, "/ingest", server.Handler.token, method="POST", body=body)
+    assert status == 401, (status, raw[:200])
+    print("    401 by default")
+    server.Handler.allow_shared = True
+    try:
+        status, raw = call(BASE, "/ingest", server.Handler.token, method="POST",
+                           body=body)
+        assert status == 200, (status, raw[:200])
+        print("    200 once explicitly allowed")
+    finally:
+        server.Handler.allow_shared = False
+
+
+def test_no_response_names_a_database_id():
+    """Database ids are internal handles. They used to ride along in
+    /api/status, /api/data's source and the admin state; nothing a browser or
+    the skill does needs them."""
+    print("no read route names the org database:")
+    for path in ("/api/status", "/api/data"):
+        status, raw = call(BASE, path, READ)
+        assert status == 200, (path, status)
+        text = raw.decode()
+        assert "dbid" not in text and "orgDatabase" not in text, (path, text[:200])
+        print(f"    {path}: clean")
+
+
+def test_an_unverified_account_reaches_nothing():
+    """One gate for every viewer: a read token minted for an account that has
+    not confirmed its address is refused on every read route, and so is its
+    ingest. ada is grandfathered here by marking her verified, since the
+    fixture created her just now."""
+    print("an unverified account:")
+    auth = server.Handler.auth
+    auth.verification = True
+    try:
+        auth.mark_verified("ada@x.dev")
+        auth.create_account("newbie@x.dev", "hunter2hunter2")
+        auth.join_org("newbie@x.dev", "acme-inc")
+        token = fakes.approved_token(auth, "newbie@x.dev", scope="ingest,read")
+        for path in ("/api/data", "/api/status", "/api/orgs", "/api/session/sess-1"):
+            status, raw = call(BASE, path, token)
+            assert status == 403 and b"confirm your email" in raw, (path, status, raw[:200])
+            print(f"    403 {path}")
+        body = {"user_email": "newbie@x.dev", "hostname": "laptop", "sessions": []}
+        status, raw = call(BASE, "/ingest", token, method="POST", body=body)
+        assert status == 403 and b"not confirmed" in raw, (status, raw[:200])
+        print("    403 POST /ingest")
+        # ada, verified, is unaffected on the same routes
+        assert call(BASE, "/api/status", READ)[0] == 200
+        auth.mark_verified("newbie@x.dev")
+        assert call(BASE, "/api/status", token)[0] == 200, "verified, the same token works"
+        print("    200 once verified")
+    finally:
+        auth.verification = False
+
+
 def test_an_unauthenticated_api_call_is_401():
     for path in ("/api/data", "/api/status", "/api/orgs"):
         status, _ = call(BASE, path)
