@@ -27,6 +27,17 @@ jobs:
         with:
           persist-credentials: false
 
+      # `:<sha>` names the image tested at merge, so a rollback to it must get
+      # that image. A scheduled rebuild shares the sha of the last push but
+      # contains different bytes, so it gets a tag of its own.
+      - name: Image tag
+        run: |
+          tag="$GITHUB_SHA"
+          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
+            tag="$tag-rebuild-$(date -u +%Y%m%d)"
+          fi
+          echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
+
       # Every suite is stdlib-only and needs no hotdata account, so they run
       # before the image is even built.
       - name: Tests
@@ -37,14 +48,14 @@ jobs:
           done
 
       - name: Build image
-        run: docker build --pull -t "$GHCR_IMAGE:${{ github.sha }}" .
+        run: docker build --pull -t "$GHCR_IMAGE:$IMAGE_TAG" .
 
       # Refuse to publish an image with a known, fixable vulnerability. Trivy
       # runs from its own pinned image rather than a third-party action, and
       # reads a saved tarball so it does not depend on the daemon's image store.
       - name: Vulnerability scan
         run: |
-          docker save "$GHCR_IMAGE:${{ github.sha }}" -o image.tar
+          docker save "$GHCR_IMAGE:$IMAGE_TAG" -o image.tar
           docker run --rm -v "$PWD:/scan" \
             aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
             image --input /scan/image.tar --severity CRITICAL,HIGH --ignore-unfixed \
@@ -56,7 +67,7 @@ jobs:
       - name: Smoke test (healthz)
         run: |
           docker run -d --name hototel -e HOTUSAGE_INGEST_TOKEN=ci-smoke \
-            -p 8377:8377 "$GHCR_IMAGE:${{ github.sha }}"
+            -p 8377:8377 "$GHCR_IMAGE:$IMAGE_TAG"
           ok=""
           for i in $(seq 1 20); do
             curl -sf http://127.0.0.1:8377/healthz && ok=1 && break
@@ -74,7 +85,7 @@ jobs:
       # container still running after 10s means that refusal has regressed.
       - name: Smoke test (refuses open ingest)
         run: |
-          docker run -d --name hototel-open -p 8378:8377 "$GHCR_IMAGE:${{ github.sha }}"
+          docker run -d --name hototel-open -p 8378:8377 "$GHCR_IMAGE:$IMAGE_TAG"
           code=""
           for i in $(seq 1 10); do
             status=$(docker inspect -f '{{.State.Status}}' hototel-open)
@@ -105,8 +116,8 @@ jobs:
         if: github.ref == 'refs/heads/main'
         run: |
           echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker tag "$GHCR_IMAGE:${{ github.sha }}" "$GHCR_IMAGE:latest"
-          docker push "$GHCR_IMAGE:${{ github.sha }}"
+          docker tag "$GHCR_IMAGE:$IMAGE_TAG" "$GHCR_IMAGE:latest"
+          docker push "$GHCR_IMAGE:$IMAGE_TAG"
           docker push "$GHCR_IMAGE:latest"
 
       # Mirror into the labs ECR repo App Runner pulls from (App Runner cannot
@@ -156,7 +167,7 @@ jobs:
         run: |
           aws ecr get-login-password --region us-west-2 \
             | docker login --username AWS --password-stdin "${{ vars.AWS_LABS_ECR_REPO }}"
-          docker tag "$GHCR_IMAGE:${{ github.sha }}" "${{ vars.AWS_LABS_ECR_REPO }}:${{ github.sha }}"
-          docker tag "$GHCR_IMAGE:${{ github.sha }}" "${{ vars.AWS_LABS_ECR_REPO }}:latest"
-          docker push "${{ vars.AWS_LABS_ECR_REPO }}:${{ github.sha }}"
+          docker tag "$GHCR_IMAGE:$IMAGE_TAG" "${{ vars.AWS_LABS_ECR_REPO }}:$IMAGE_TAG"
+          docker tag "$GHCR_IMAGE:$IMAGE_TAG" "${{ vars.AWS_LABS_ECR_REPO }}:latest"
+          docker push "${{ vars.AWS_LABS_ECR_REPO }}:$IMAGE_TAG"
           docker push "${{ vars.AWS_LABS_ECR_REPO }}:latest"
