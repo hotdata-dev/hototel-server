@@ -28,14 +28,16 @@ jobs:
           persist-credentials: false
 
       # `:<sha>` names the image tested at merge, so a rollback to it must get
-      # that image. A scheduled rebuild shares the sha of the last push but
-      # contains different bytes, so it gets a tag of its own.
+      # that image. A scheduled or manual rebuild shares the sha of the last
+      # push but contains different bytes, so it gets a tag of its own; the run
+      # id keeps two rebuilds on the same day from colliding.
       - name: Image tag
         run: |
           tag="$GITHUB_SHA"
-          if [ "$GITHUB_EVENT_NAME" = "schedule" ]; then
-            tag="$tag-rebuild-$(date -u +%Y%m%d)"
-          fi
+          case "$GITHUB_EVENT_NAME" in
+            push|pull_request) ;;
+            *) tag="$tag-rebuild-$(date -u +%Y%m%d)-$GITHUB_RUN_ID" ;;
+          esac
           echo "IMAGE_TAG=$tag" >> "$GITHUB_ENV"
 
       # Every suite is stdlib-only and needs no hotdata account, so they run
