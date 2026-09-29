@@ -4,6 +4,12 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Base-image CVEs are fixed upstream whether or not this repo changes, but
+  # the published image only picks them up when it is rebuilt. Rebuild weekly
+  # so a quiet repo does not sit on a stale image.
+  schedule:
+    - cron: "0 14 * * 1"
+  workflow_dispatch:
 
 env:
   GHCR_IMAGE: ghcr.io/hotdata-dev/hototel-server
@@ -18,6 +24,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Every suite is stdlib-only and needs no hotdata account, so they run
       # before the image is even built.
@@ -29,7 +37,19 @@ jobs:
           done
 
       - name: Build image
-        run: docker build -t "$GHCR_IMAGE:${{ github.sha }}" .
+        run: docker build --pull -t "$GHCR_IMAGE:${{ github.sha }}" .
+
+      # Refuse to publish an image with a known, fixable vulnerability. Trivy
+      # runs from its own pinned image rather than a third-party action, and
+      # reads a saved tarball so it does not depend on the daemon's image store.
+      - name: Vulnerability scan
+        run: |
+          docker save "$GHCR_IMAGE:${{ github.sha }}" -o image.tar
+          docker run --rm -v "$PWD:/scan" \
+            aquasec/trivy:0.74.0@sha256:62b1e65e8869bc4b4c6aa4fa2b21595256c7c2f6018a9d9ad61caf87187c1969 \
+            image --input /scan/image.tar --severity CRITICAL,HIGH --ignore-unfixed \
+            --exit-code 1 --no-progress
+          rm image.tar
 
       # The container binds 0.0.0.0, so it needs an ingest token to start at
       # all -- see the open-ingest refusal below.
