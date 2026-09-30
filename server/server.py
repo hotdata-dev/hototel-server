@@ -13,7 +13,9 @@ Two planes, all in hotdata (no local database):
       org database, and the dashboard reads only the viewer's org database.
 
 Auth: dashboard login (scrypt passwords, 30-day cookie sessions); collectors
-send `Authorization: Bearer $HOTUSAGE_INGEST_TOKEN` (unset = dev mode). Usage
+send a per-user bearer token from the device flow. HOTUSAGE_INGEST_TOKEN unset
+means dev mode (accept all); set, it is the switch that requires a token, and
+is itself accepted only with HOTUSAGE_ALLOW_SHARED_INGEST=1. Usage
 reported by an email that is not a registered user is rejected (403) — there
 is no org database to put it in.
 
@@ -46,7 +48,10 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 import html
+from html import escape as html_escape
 from urllib.parse import urlparse, parse_qs, quote
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core  # noqa: E402
@@ -177,13 +182,29 @@ TABLES = {
         "key": ["token"],
         "cols": [("token", "VARCHAR"), ("scope", "VARCHAR")],
     },
+    # Email verification. A registered address is a CLAIM until a link sent
+    # to it is opened while signed in as that account; until then the account
+    # sees and reports nothing, and anyone else may register the address over
+    # it. `verified_emails` is a side table (users' columns are fixed at first
+    # write); absence of a row means unverified, unless the account predates
+    # AuthStore.VERIFICATION_SINCE.
+    "email_verifications": {
+        "key": ["token"],
+        "cols": [("token", "VARCHAR"), ("email", "VARCHAR"),
+                 ("created_at", "TIMESTAMPTZ"), ("expires_at", "DOUBLE")],
+    },
+    "verified_emails": {
+        "key": ["email"],
+        "cols": [("email", "VARCHAR"), ("verified_at", "TIMESTAMPTZ")],
+    },
 }
 
 USAGE_TABLES = ("sessions", "requests", "daily_usage")
 SYSTEM_TABLES = ("orgs", "users", "auth_sessions", "invites", "team_invites",
                  "device_codes", "device_scopes", "collector_tokens",
                  "collector_token_usage", "token_scopes",
-                 "org_admins", "system_admins", "org_memberships")
+                 "org_admins", "system_admins", "org_memberships",
+                 "email_verifications", "verified_emails")
 
 
 # ---------------------------------------------------------------------------
@@ -258,12 +279,23 @@ class HotdataClient:
         return [dict(zip(cols, r)) for r in rows]
 
     def rows(self, query):
-        """sql() that treats declared-but-empty tables as empty results."""
+        """sql() that treats declared-but-empty tables as empty results.
+
+        Only a 400 qualifies. hotdata answers a missing or never-written table
+        with HTTP 400 and text like "not found" / "has no data" (measured
+        2026-09-17); a 404 is the API saying the DATABASE or workspace is not
+        there, and the SDK formats that as "Reason: Not Found" -- the same
+        words. Reading a 404 as "no rows" made every "is this org empty?"
+        check fail open: a transient 404 during a join would have made the
+        joiner an admin of an established org, and one during delete-org would
+        have removed an org that still had members. So anything but a 400
+        propagates, and those callers fail the request instead of guessing."""
         try:
             return self.sql(query)
         except Exception as e:
             msg = str(e).lower()
-            if "not found" in msg or "has no data" in msg:
+            if getattr(e, "status", None) == 400 and \
+                    ("not found" in msg or "has no data" in msg):
                 # Text matching, not exception classes: the SDK import is lazy,
                 # so there is no class to catch here. That makes this branch wide
                 # enough to swallow a genuinely broken query, so say so -- an
@@ -369,6 +401,36 @@ def gather(tasks=None, /, **thunks):
 # AuthStore: orgs, users, cookie sessions in the system database. Creating an
 # org provisions its dedicated usage database.
 # ---------------------------------------------------------------------------
+class ResendMailer:
+    """The one thing this server ever emails: a verification link.
+
+    Resend's REST API over urllib -- one POST, a bearer key, JSON in and out --
+    so there is still no dependency beyond the standard library. Configured
+    from RESEND_API_KEY and HOTUSAGE_EMAIL_FROM; with either unset there is no
+    mailer, and verification is off (see main)."""
+    URL = "https://api.resend.com/emails"
+    TIMEOUT = 10
+
+    def __init__(self, api_key, sender):
+        self.api_key = api_key
+        self.sender = sender
+
+    def send(self, to, subject, text, html):
+        body = json.dumps({"from": self.sender, "to": [to], "subject": subject,
+                           "text": text, "html": html}).encode()
+        req = urllib.request.Request(
+            self.URL, data=body, method="POST",
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.TIMEOUT) as r:
+                return json.loads(r.read() or b"{}").get("id")
+        except urllib.error.HTTPError as e:
+            # the body names the problem (bad key, unverified sending domain);
+            # a prefix of it is enough for the log
+            raise RuntimeError(f"resend {e.code}: {e.read()[:200]!r}") from None
+
+
 SESSION_TTL = 30 * 24 * 3600
 SYS = core.SYSTEM_CATALOG
 
@@ -397,6 +459,11 @@ class AuthStore:
         self.org_cache = {}          # org_slug -> (org dict, fetched_at)
         self.scope_cache = {}        # token -> (scope, fetched_at); real tokens only
         self.read_cache = {}         # token -> (viewer dict, fetched_at)
+        self.verified_cache = {}     # email -> (verified, fetched_at)
+        # Whether addresses must be verified at all. Set by main() when a
+        # mailer is configured; off, is_verified is always True, so dev, CI
+        # and a deployment without Resend keep working as before.
+        self.verification = False
         self.lock = threading.Lock()
 
     def get_org(self, slug, ttl=60):
@@ -509,7 +576,8 @@ class AuthStore:
 
     # (table, table whose rows share this one's key and die with it)
     EXPIRING_TABLES = (("auth_sessions", None), ("invites", None),
-                       ("team_invites", None), ("device_codes", "device_scopes"))
+                       ("team_invites", None), ("device_codes", "device_scopes"),
+                       ("email_verifications", None))
 
     def _purge_expired(self):
         """Sweep every expired row. Per table, because one unreachable or
@@ -614,6 +682,13 @@ class AuthStore:
         so the account exists first and outlives either."""
         email = email.strip().lower()
         if self.get_user(email):
+            if self.verification and not self.is_verified(email):
+                # nobody has proved this mailbox yet, so the row is a claim,
+                # not an account: whoever registers now takes it over and the
+                # link in the mailbox decides. This is what stops an address
+                # being squatted ahead of its owner.
+                self.take_over(email, password)
+                return
             raise ValueError("that email is already registered")
         self.sysdb.load("users", [{"email": email,
                                    "password_hash": hash_password(password),
@@ -622,6 +697,7 @@ class AuthStore:
                         "upsert")
         with self.lock:
             self.route_cache.pop(email, None)
+            self.verified_cache.pop(email, None)
 
     def create_org_for(self, email, org_name):
         """Create an org around an account that already exists, making it the
@@ -697,7 +773,16 @@ class AuthStore:
         if not inv:
             raise ValueError("this invite is invalid or has expired")
         email = inv["email"]
-        if self.get_user(email):
+        user = self.get_user(email)
+        if user and self.verification and not self.is_verified(email):
+            # an unverified row is a claim on the address, not an account (see
+            # create_account): the acceptor sets the password and the mailbox
+            # decides who really joined
+            if not password:
+                raise ValueError("choose a password")
+            self.take_over(email, password)
+            self.join_org(email, inv["org_slug"])
+        elif user:
             # possession of the link is not proof of the mailbox; the session is
             if (as_user or "").strip().lower() != email:
                 raise ValueError("this invite belongs to an existing account - "
@@ -805,7 +890,10 @@ class AuthStore:
             # one query spanning both tables cannot degrade per table -- so an
             # empty org_memberships would zero every count. Re-read separately.
             counts = self._counts_from_full_reads()
-        return [{**o, "members": counts.get(o["slug"], 0)} for o in got["orgs"]]
+        # database ids stay on the server: the admin page names orgs by slug,
+        # and the id is an internal handle no browser needs
+        return [{"slug": o["slug"], "name": o["name"], "created_at": o["created_at"],
+                 "members": counts.get(o["slug"], 0)} for o in got["orgs"]]
 
     def _counts_from_full_reads(self):
         both = gather(
@@ -914,6 +1002,13 @@ class AuthStore:
         email = email.strip().lower()
         remaining = self.memberships(email) - {org_slug}
         if not remaining:
+            # this was their only org, so removal means deleting the account --
+            # and an org admin must not be able to delete a platform operator
+            # (remove_user also strips the system-admin grant). The CLI's
+            # deluser is the operator path and calls remove_user directly.
+            if self.is_system_admin(email):
+                raise ValueError("that person is a platform operator; only a "
+                                 "system admin can remove them (server.py deluser)")
             self.remove_user(email)
             return
         self.set_admin(email, org_slug, False)
@@ -956,9 +1051,20 @@ class AuthStore:
         # and the platform grant: otherwise whoever re-registers this address
         # at the public /register endpoint inherits system admin
         self.set_system_admin(email, False)
+        for table in ("verified_emails", "email_verifications"):
+            try:
+                rows = self.sysdb.rows(f"SELECT * FROM {SYS}.public.{table} "
+                                       f"WHERE email = {sql_str(email)}")
+                if rows:
+                    key = TABLES[table]["key"]
+                    self.sysdb.load(table, [{k: r[k] for k in key} for r in rows], "delete")
+            except Exception as e:
+                print(f"warn: {table} row delete: {e}", file=sys.stderr)
         self.sysdb.load("users", [{"email": email}], "delete")
         with self.lock:
             self.route_cache.pop(email, None)
+            # or whoever registers this address next inherits a verified answer
+            self.verified_cache.pop(email, None)
 
     def rename_org(self, slug, name):
         # read every column: an upsert must carry the whole row, and get_org
@@ -1147,7 +1253,17 @@ class AuthStore:
             raise ValueError("that does not look like an email address")
         if inv["domain"] and email.rsplit("@", 1)[1] != inv["domain"]:
             raise ValueError(f"this link only accepts @{inv['domain']} addresses")
-        if self.get_user(email):
+        user = self.get_user(email)
+        if user and self.verification and not self.is_verified(email):
+            # same takeover as accept_invite: the row is a claim until the
+            # mailbox confirms it, and the domain check above is only worth
+            # anything because of that
+            if not password:
+                raise ValueError("choose a password")
+            self.take_over(email, password)
+            if inv["org_slug"] not in self.memberships(email):
+                self.join_org(email, inv["org_slug"])
+        elif user:
             if (as_user or "").strip().lower() != email:
                 raise ValueError("that email already has an account - sign in first")
             if inv["org_slug"] in self.memberships(email):
@@ -1434,6 +1550,113 @@ class AuthStore:
             "last_used_at": datetime.now(timezone.utc).isoformat(),
         }], "upsert")
 
+    # --- email verification --------------------------------------------------
+    VERIFY_TTL = 24 * 3600
+    # A verified answer never reverts, so it is kept for the life of the
+    # process; an unverified one is re-read often, since the next request
+    # after the click should see the change.
+    VERIFIED_NEG_TTL = 15
+    # Accounts created before this predate verification and are trusted as
+    # they were. Everyone after it proves the mailbox before seeing or
+    # reporting anything. The instant the change shipped, not a round date:
+    # a later cutoff would grandfather whoever registered in the gap.
+    VERIFICATION_SINCE = datetime(2026, 9, 17, 19, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def _as_datetime(value):
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value
+
+    def is_verified(self, email):
+        """Has this address been proved -- or does it predate the requirement?
+        Always True with verification off."""
+        if not self.verification:
+            return True
+        email = email.strip().lower()
+        now = time.time()
+        with self.lock:
+            hit = self.verified_cache.get(email)
+            if hit and (hit[0] or now - hit[1] < self.VERIFIED_NEG_TTL):
+                return hit[0]
+        ok = bool(self.sysdb.rows(f"SELECT email FROM {SYS}.public.verified_emails "
+                                  f"WHERE email = {sql_str(email)}"))
+        if not ok:
+            rows = self.sysdb.rows(f"SELECT created_at FROM {SYS}.public.users "
+                                   f"WHERE email = {sql_str(email)}")
+            created = self._as_datetime(rows[0]["created_at"]) if rows else None
+            ok = created is not None and created < self.VERIFICATION_SINCE
+        with self.lock:
+            self.verified_cache[email] = (ok, now)
+        return ok
+
+    def mark_verified(self, email):
+        email = email.strip().lower()
+        self.sysdb.load("verified_emails", [{
+            "email": email,
+            "verified_at": datetime.now(timezone.utc).isoformat()}], "upsert")
+        with self.lock:
+            self.verified_cache.pop(email, None)
+
+    def take_over(self, email, password):
+        """Re-register an UNVERIFIED address: new password, and every session
+        the previous claimant held is revoked, so they cannot ride along once
+        the real owner verifies. Callers check is_verified first."""
+        email = email.strip().lower()
+        self.set_password(email, password)
+        toks = self.sysdb.rows(f"SELECT token FROM {SYS}.public.auth_sessions "
+                               f"WHERE user_email = {sql_str(email)}")
+        if toks:
+            self.sysdb.load("auth_sessions", toks, "delete")
+        with self.lock:
+            for t in toks:
+                self.token_cache.pop(t["token"], None)
+            self.verified_cache.pop(email, None)
+
+    def start_verification(self, email):
+        """Mint a link token for `email`. Returns the token; the caller mails it."""
+        email = email.strip().lower()
+        if not self.get_user(email):
+            raise ValueError("no such user")
+        token = secrets.token_urlsafe(32)
+        self.sysdb.load("email_verifications", [{
+            "token": token, "email": email,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "expires_at": time.time() + self.VERIFY_TTL}], "upsert")
+        return token
+
+    def consume_verification(self, token, as_user):
+        """Mark the address verified if `token` is live AND the person opening
+        it is signed in as that account. Returns the email, or None.
+
+        The session requirement is the point: a link lands in the mailbox
+        whoever registered the address, so a stranger who registered it and
+        then waited for the owner to click would otherwise end up with a
+        verified account under the owner's name. Every link for the address
+        dies with the one that was used."""
+        if not token or not re.match(r"^[A-Za-z0-9_-]{20,64}$", token):
+            return None
+        rows = self.sysdb.rows(f"SELECT token, email, expires_at "
+                               f"FROM {SYS}.public.email_verifications "
+                               f"WHERE token = {sql_str(token)}")
+        if not rows or float(rows[0]["expires_at"]) < time.time():
+            return None
+        email = rows[0]["email"]
+        if (as_user or "").strip().lower() != email or not self.get_user(email):
+            return None
+        self.mark_verified(email)
+        siblings = self.sysdb.rows(f"SELECT token FROM {SYS}.public.email_verifications "
+                                   f"WHERE email = {sql_str(email)}")
+        self.sysdb.load("email_verifications", siblings or [{"token": token}], "delete")
+        return email
+
     def seed(self):
         """First boot: system tables; org hotdata (with its dedicated database)
         and eddie@hotdata.dev as the first user."""
@@ -1559,7 +1782,7 @@ class HotdataStore:
         } for r in daily_rows]
         return {
             "generatedAt": datetime.now(timezone.utc).isoformat(),
-            "source": f"hotdata {self.hd.db}",
+            "source": "hotdata",
             "sessions": sessions,
             "daily": daily,
         }
@@ -1622,6 +1845,10 @@ def apply_ingest(auth, pool, payload):
         raise PermissionError(
             f"{user} is not a registered user; an admin must add them "
             f"(server.py adduser {user} --org <slug>) before their usage is accepted")
+    if not auth.is_verified(user):
+        raise PermissionError(
+            f"{user} has not confirmed their email address yet; open the link "
+            f"hototel sent them (or sign in and request a new one at /verify)")
     org_slug, db_id = route
     sessions = payload.get("sessions") or []
     if not sessions:
@@ -1645,6 +1872,14 @@ class Handler(BaseHTTPRequestHandler):
     stores = None      # StorePool
     auth = None        # AuthStore (system database)
     token = None       # ingest bearer token ('' = dev mode, accept all)
+    # Whether that shared token is itself accepted as an ingest credential.
+    # Off by default: it only ADMITS -- anyone holding it can report as any
+    # registered address in any organization -- so in production the token is
+    # just the switch that says "authentication is required" and every write
+    # must carry a per-user token. HOTUSAGE_ALLOW_SHARED_INGEST=1 turns it on.
+    allow_shared = False
+    mailer = None      # ResendMailer, or None when verification is off
+    VERIFY_RATE_LIMIT = 5   # resends per IP per hour
     max_body = 64 * 1024 * 1024
 
     # socketserver sets this on the connection socket, so a peer that opens a
@@ -1849,6 +2084,71 @@ class Handler(BaseHTTPRequestHandler):
         return any(part.strip().startswith("hotusage_install_skipped=1")
                    for part in header.split(";"))
 
+    def _gated_on_verify(self, viewer, path):
+        """An account that has not confirmed its address sees and does
+        nothing: pages go to /verify, API calls get a 403. One gate for the
+        cookie session AND the read token, since both arrive as a viewer.
+        Returns True when it handled the request. No-op with verification off."""
+        if self.auth.is_verified(viewer["email"]):
+            return False
+        if path.startswith("/api/"):
+            self._json({"error": "confirm your email address first: sign in at "
+                                 "/verify and open the link we sent"}, 403)
+        else:
+            self._redirect("/verify")
+        return True
+
+    def _send_verification(self, email):
+        """Mail a fresh link. Failure is logged, never raised: the account
+        exists either way and /verify offers a resend."""
+        if not self.mailer:
+            return
+        try:
+            token = self.auth.start_verification(email)
+            proto, host = self._public_origin()
+            link = f"{proto}://{host}/verify/{token}"
+            text = (f"Confirm this address to finish setting up hototel:\n\n{link}\n\n"
+                    f"The link works for 24 hours, and only while you are signed in "
+                    f"to hototel as {email}. If you did not create a hototel account, "
+                    f"you can ignore this message.")
+            html = (f"<p>Confirm this address to finish setting up hototel:</p>"
+                    f"<p><a href=\"{html_escape(link)}\">{html_escape(link)}</a></p>"
+                    f"<p>The link works for 24 hours, and only while you are signed in "
+                    f"to hototel as {html_escape(email)}. If you did not create a "
+                    f"hototel account, you can ignore this message.</p>")
+            self.mailer.send(email, "Confirm your email for hototel", text, html)
+        except Exception as e:
+            print(f"error: verification mail to {email}: {e}", file=sys.stderr)
+
+    def _handle_verify_page(self, parsed):
+        """GET /verify (the waiting page) and GET /verify/<token> (the link)."""
+        viewer = self._viewer()
+        if not viewer:
+            # the link only counts while signed in as its account -- see
+            # consume_verification -- so sign in first, then come back to it
+            self._redirect("/login?next=" + quote(self.path))
+            return
+        token = parsed.path[len("/verify/"):] if parsed.path.startswith("/verify/") else ""
+        if token:
+            if self.auth.consume_verification(token, as_user=viewer["email"]):
+                self._redirect("/")
+                return
+            self._page("verify.html", {
+                "EMAIL": viewer["email"], "MSG": "",
+                "ERROR": "That link is invalid, expired, or for a different "
+                         "account. Request a new one below."})
+            return
+        if self.auth.is_verified(viewer["email"]):
+            self._redirect("/")
+            return
+        q = parse_qs(parsed.query)
+        msg, err = "", ""
+        if q.get("sent"):
+            msg = "A new link is on its way."
+        elif q.get("err") == ["rate"]:
+            err = "Too many requests; try again in a while."
+        self._page("verify.html", {"EMAIL": viewer["email"], "MSG": msg, "ERROR": err})
+
     def _gated_on_install(self, viewer, path):
         """Send an account with nothing reporting to the install prompt.
 
@@ -2000,15 +2300,19 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as e:
             self._redirect("/register?err=" + quote(str(e)))
             return
+        self._send_verification(email)
         token = self.auth.login(email, password)
-        # the account exists now; _needs_org sends them on to make one
-        self._redirect("/setup", extra=[("Set-Cookie", self._session_cookie(token))])
+        # the account exists now: confirm the address, then make an org
+        self._redirect("/verify" if self.auth.verification else "/setup",
+                       extra=[("Set-Cookie", self._session_cookie(token))])
 
     def _handle_setup(self):
         """Create the org for a signed-in account that has none."""
         viewer = self._viewer()
         if not viewer:
             self._redirect("/login?next=%2Fsetup")
+            return
+        if self._gated_on_verify(viewer, "/setup"):
             return
         form = self._read_form()
         nxt = self._safe_next(form.get("next", "/"))
@@ -2045,10 +2349,15 @@ class Handler(BaseHTTPRequestHandler):
         as_user = viewer["email"] if viewer else None
         try:
             inv = self.auth.get_invite(token)
-            joining_existing = (
-                (inv and self.auth.get_user(inv["email"])) or
-                (not inv and form.get("email") and
-                 self.auth.get_user(form.get("email", ""))))
+
+            def established(addr):
+                # an unverified row is a claim, not an account: the acceptor
+                # sets a password and takes it over (see AuthStore.take_over)
+                addr = (addr or "").strip().lower()
+                return bool(addr and self.auth.get_user(addr)
+                            and self.auth.is_verified(addr))
+            joining_existing = established(inv["email"]) if inv \
+                else established(form.get("email", ""))
             if not joining_existing and len(password) < 8:
                 raise ValueError("password must be at least 8 characters")
             if inv:
@@ -2061,7 +2370,9 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect(f"/invite/{quote(token, safe='')}?err=" + quote(str(e))
                            + "&email=" + quote(form.get("email", "")[:120]))
             return
-        if viewer and viewer["email"] == email:
+        if not joining_existing:
+            self._send_verification(email)
+        if viewer and viewer["email"] == email and joining_existing:
             # already signed in; switch_org cleared the token cache, so the
             # next request re-reads the new active org
             self._redirect("/")
@@ -2112,11 +2423,31 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"error: /invite: {e}", file=sys.stderr)
                 self._json({"error": "invite failed"}, 500)
             return
+        if path == "/verify/resend":
+            try:
+                viewer = self._viewer()
+                if not viewer:
+                    self._redirect("/login?next=%2Fverify")
+                    return
+                if self.auth.is_verified(viewer["email"]):
+                    self._redirect("/")
+                    return
+                if self._rate_limited("verify", limit=self.VERIFY_RATE_LIMIT):
+                    self._redirect("/verify?err=rate")
+                    return
+                self._send_verification(viewer["email"])
+                self._redirect("/verify?sent=1")
+            except Exception as e:
+                print(f"error: /verify/resend: {e}", file=sys.stderr)
+                self._json({"error": "could not send that"}, 500)
+            return
         if path == "/api/invite":
             try:
                 viewer = self._viewer()
                 if not viewer:
                     self._json({"error": "unauthorized"}, 401)
+                    return
+                if self._gated_on_verify(viewer, path):
                     return
                 # inviting grows the org: management, so admins only
                 if not self.auth.is_admin(viewer["email"], viewer["org_slug"]):
@@ -2188,6 +2519,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not viewer:
                     self._json({"error": "unauthorized"}, 401)
                     return
+                if self._gated_on_verify(viewer, path):
+                    return
                 org = viewer["org_slug"]
                 body = self._read_json()
                 action = path[len("/api/admin/"):]
@@ -2219,8 +2552,8 @@ class Handler(BaseHTTPRequestHandler):
                     else:
                         if body.get("slug") == viewer["org_slug"]:
                             raise ValueError("you cannot delete your own organization")
-                        db = self.auth.delete_empty_org(body.get("slug", ""))
-                        self._json({"ok": True, "database_kept": db})
+                        self.auth.delete_empty_org(body.get("slug", ""))
+                        self._json({"ok": True, "database_kept": True})
                     return
 
                 if not self.auth.is_admin(viewer["email"], org):
@@ -2280,6 +2613,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not viewer:
                     self._json({"error": "unauthorized"}, 401)
                     return
+                if self._gated_on_verify(viewer, path):
+                    return
                 body = self._read_json()
                 self.auth.switch_org(viewer["email"], body.get("slug", ""))
                 self._json({"ok": True, "active": body.get("slug", "")})
@@ -2324,6 +2659,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not viewer:
                     self._redirect("/login")
                     return
+                if self._gated_on_verify(viewer, path):
+                    return
                 form = self._read_form()
                 # TYPED, never prefilled: approving binds a collector to this
                 # account, and the person copying the code off that machine's
@@ -2353,15 +2690,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"error": "not found"}, 404)
             return
         try:
-            # Two credentials are accepted. A per-user collector token (minted
-            # by the sign-in flow) also *identifies* the reporter, so it
-            # overrides whatever address the payload claims. The shared ingest
-            # token only admits: it cannot say who is reporting, so the claimed
-            # address stands. Prefer the former.
+            # A per-user collector token (minted by the sign-in flow) also
+            # *identifies* the reporter, so it overrides whatever address the
+            # payload claims. The shared ingest token only admits: it cannot
+            # say who is reporting, so the claimed address stands -- which is
+            # why it is a credential only when allow_shared is set.
             presented = self._bearer()
             # constant-time: the shared token admits ingest for the whole
             # company, and == leaks its prefix length to a timing probe
-            shared = bool(self.token) and hmac.compare_digest(
+            shared = self.allow_shared and bool(self.token) and hmac.compare_digest(
                 presented.encode(), self.token.encode())
             owner = None if shared or not presented \
                 else self.auth.collector_token_user(presented)
@@ -2477,10 +2814,15 @@ class Handler(BaseHTTPRequestHandler):
                 err = parse_qs(parsed.query).get("err", [""])[0]
                 self._page("register.html", {"ERROR": err[:200]})
                 return
+            if path == "/verify" or path.startswith("/verify/"):
+                self._handle_verify_page(parsed)
+                return
             if path == "/setup":
                 viewer = self._viewer()
                 if not viewer:
                     self._redirect("/login?next=%2Fsetup")
+                    return
+                if self._gated_on_verify(viewer, path):
                     return
                 if viewer.get("org_slug"):  # already in one: nothing to ask for
                     self._redirect("/")
@@ -2525,6 +2867,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not viewer:
                     self._redirect("/login?next=" + quote(self.path))
                     return
+                if self._gated_on_verify(viewer, path):
+                    return
                 if not viewer.get("org_slug"):  # nothing to administer yet
                     self._redirect("/setup?next=" + quote(self.path))
                     return
@@ -2538,6 +2882,8 @@ class Handler(BaseHTTPRequestHandler):
                 if not viewer:
                     # sign in first, then come back to this exact approval
                     self._redirect("/login?next=" + quote(self.path))
+                    return
+                if self._gated_on_verify(viewer, path):
                     return
                 # a collector reports into its owner's active org, so there has
                 # to be one before a device can be approved at all. Carry the
@@ -2586,6 +2932,10 @@ class Handler(BaseHTTPRequestHandler):
                     self._json({"error": "unauthorized"}, 401)
                 else:
                     self._redirect("/login")
+                return
+
+            # before anything else: an unproved address is not yet anyone
+            if self._gated_on_verify(viewer, path):
                 return
 
             # registration creates the account alone, so a viewer can be signed
@@ -2651,8 +3001,7 @@ class Handler(BaseHTTPRequestHandler):
                 is_admin = email in roster["admins"]
                 payload = {
                     "viewer": {"email": email, "isAdmin": is_admin},
-                    "org": {"slug": org, "name": viewer["org_name"],
-                            "database": viewer.get("database_id")},
+                    "org": {"slug": org, "name": viewer["org_name"]},
                     "members": roster["members"],
                 }
                 extra = {}
@@ -2672,8 +3021,7 @@ class Handler(BaseHTTPRequestHandler):
                         for s in slugs]
                 self._json({"active": viewer["org_slug"], "orgs": orgs})
             elif path == "/api/status":
-                self._json({"ok": True, "org": viewer["org_slug"],
-                            "orgDatabase": viewer.get("database_id")})
+                self._json({"ok": True, "org": viewer["org_slug"]})
             elif path.startswith("/api/session/"):
                 sid = path.rsplit("/", 1)[1]
                 if not viewer.get("database_id"):
@@ -2748,7 +3096,7 @@ class Handler(BaseHTTPRequestHandler):
 ADMIN_VERBS = ("adduser", "addorg", "resetpw", "deluser", "delorg",
                "listusers", "listorgs", "listinvites", "revokeinvite",
                "listtokens", "revoketoken", "makeadmin", "unadmin",
-               "makesysadmin", "unsysadmin")
+               "makesysadmin", "unsysadmin", "markverified")
 
 def drop_usage_rows(auth, rows):
     """Best-effort cleanup of the side rows that hang off a token: its usage
@@ -2929,6 +3277,15 @@ def user_admin_cli(argv):
             drop_usage_rows(auth, [{"token": a.target}])
             print(f"revoked collector token {a.target}")
 
+    elif verb == "markverified":
+        # support path: the mail never arrived and the person is who they say
+        # they are -- the operator is vouching for the mailbox
+        user = auth.get_user(a.target)
+        if not user:
+            sys.exit(f"no such user: {a.target}")
+        auth.mark_verified(user["email"])
+        print(f"{user['email']} marked as verified")
+
     elif verb == "revokeinvite":
         # match the raw rows, so an exhausted or expired link (which the live
         # getters correctly hide) can still be cleaned out of the table
@@ -3000,7 +3357,20 @@ def main():
                 time.sleep(60)
         threading.Thread(target=seed_retry, daemon=True, name="seed-retry").start()
     Handler.stores = StorePool(Handler.pool, args.ttl)
+    resend_key = os.environ.get("RESEND_API_KEY", "")
+    sender = os.environ.get("HOTUSAGE_EMAIL_FROM", "")
+    if resend_key and sender:
+        Handler.mailer = ResendMailer(resend_key, sender)
+        Handler.auth.verification = True
+    else:
+        print("warn: RESEND_API_KEY / HOTUSAGE_EMAIL_FROM unset - email verification "
+              "is OFF: any address can register and no mailbox is ever proved",
+              file=sys.stderr)
     Handler.token = token
+    Handler.allow_shared = os.environ.get("HOTUSAGE_ALLOW_SHARED_INGEST") == "1"
+    if Handler.allow_shared:
+        print("warn: HOTUSAGE_ALLOW_SHARED_INGEST=1 - the shared token can report "
+              "usage as any registered user", file=sys.stderr)
     if not Handler.token:
         print("warn: HOTUSAGE_INGEST_TOKEN unset - accepting unauthenticated ingest (dev mode)",
               file=sys.stderr)
