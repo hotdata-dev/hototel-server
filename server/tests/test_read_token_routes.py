@@ -52,7 +52,8 @@ def handler(cookie=None, bearer=None):
 ALLOWED = ["/api/data", "/api/orgs", "/api/status", "/api/session/abc123"]
 REFUSED = ["/api/admin/state", "/", "/index.html", "/admin", "/device",
            "/logout", "/api/data/../api/admin/state", "/api/datax",
-           "/api/session", "/api/sessions/abc"]
+           "/api/session", "/api/sessions/abc", "/system", "/api/system/state",
+           "/insights", "/api/insights/status"]
 
 
 def test_a_read_token_reaches_the_read_routes():
