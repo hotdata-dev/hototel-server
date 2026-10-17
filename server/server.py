@@ -774,7 +774,12 @@ class AuthStore:
             raise ValueError("this invite is invalid or has expired")
         email = inv["email"]
         user = self.get_user(email)
-        if user and self.verification and not self.is_verified(email):
+        if user and (as_user or "").strip().lower() == email:
+            # signed in as the invited address: the session already proved the
+            # password, verified or not, so this is a plain join. (Unverified,
+            # the account still cannot see anything until the mailbox link.)
+            self.join_org(email, inv["org_slug"])
+        elif user and self.verification and not self.is_verified(email):
             # an unverified row is a claim on the address, not an account (see
             # create_account): the acceptor sets the password and the mailbox
             # decides who really joined
@@ -784,10 +789,8 @@ class AuthStore:
             self.join_org(email, inv["org_slug"])
         elif user:
             # possession of the link is not proof of the mailbox; the session is
-            if (as_user or "").strip().lower() != email:
-                raise ValueError("this invite belongs to an existing account - "
-                                 "sign in as " + email + " first")
-            self.join_org(email, inv["org_slug"])
+            raise ValueError("this invite belongs to an existing account - "
+                             "sign in as " + email + " first")
         else:
             self.create_user(email, password, inv["org_slug"])
         self.sysdb.load("invites", [{"token": token}], "delete")
@@ -1552,9 +1555,14 @@ class AuthStore:
 
     # --- email verification --------------------------------------------------
     VERIFY_TTL = 24 * 3600
-    # A verified answer never reverts, so it is kept for the life of the
-    # process; an unverified one is re-read often, since the next request
-    # after the click should see the change.
+    # Both answers expire. A verified answer never reverts for one address,
+    # but remove_user deletes the row and the address may be registered again
+    # by someone else -- and a delete is seen only by the instance that served
+    # it, so a positive entry cached forever on another instance would let the
+    # next registrant inherit it (TOKEN_CACHE_TTL exists for the same reason).
+    # An unverified answer is re-read often, since the next request after the
+    # click should see the change.
+    VERIFIED_TTL = 60
     VERIFIED_NEG_TTL = 15
     # Accounts created before this predate verification and are trusted as
     # they were. Everyone after it proves the mailbox before seeing or
@@ -1584,7 +1592,8 @@ class AuthStore:
         now = time.time()
         with self.lock:
             hit = self.verified_cache.get(email)
-            if hit and (hit[0] or now - hit[1] < self.VERIFIED_NEG_TTL):
+            ttl = self.VERIFIED_TTL if hit and hit[0] else self.VERIFIED_NEG_TTL
+            if hit and now - hit[1] < ttl:
                 return hit[0]
         ok = bool(self.sysdb.rows(f"SELECT email FROM {SYS}.public.verified_emails "
                                   f"WHERE email = {sql_str(email)}"))
@@ -1606,11 +1615,28 @@ class AuthStore:
             self.verified_cache.pop(email, None)
 
     def take_over(self, email, password):
-        """Re-register an UNVERIFIED address: new password, and every session
-        the previous claimant held is revoked, so they cannot ride along once
-        the real owner verifies. Callers check is_verified first."""
+        """Re-register an UNVERIFIED address: new password, every session the
+        previous claimant held is revoked, and every org membership, admin
+        grant and the active org they acquired is dropped. Otherwise someone
+        could pre-register a victim's address through a team link into their
+        own org, and the victim, registering later, would land in it and
+        report every session there. Same rule as remove_user: whoever claims
+        an address next inherits nothing. Invite-driven callers join their org
+        right after. Callers check is_verified first."""
         email = email.strip().lower()
-        self.set_password(email, password)
+        for slug in self.memberships(email):
+            self.set_admin(email, slug, False)
+            self.sysdb.load("org_memberships",
+                            [{"email": email, "org_slug": slug}], "delete")
+        rows = self.sysdb.rows(f"SELECT email, created_at FROM {SYS}.public.users "
+                               f"WHERE email = {sql_str(email)}")
+        if not rows:
+            raise ValueError(f"no such user: {email}")
+        self.sysdb.load("users", [{"email": email,
+                                   "password_hash": hash_password(password),
+                                   "org_slug": "",
+                                   "created_at": str(rows[0]["created_at"])}],
+                        "upsert")
         toks = self.sysdb.rows(f"SELECT token FROM {SYS}.public.auth_sessions "
                                f"WHERE user_email = {sql_str(email)}")
         if toks:
@@ -1618,6 +1644,7 @@ class AuthStore:
         with self.lock:
             for t in toks:
                 self.token_cache.pop(t["token"], None)
+            self.route_cache.pop(email, None)
             self.verified_cache.pop(email, None)
 
     def start_verification(self, email):
@@ -2838,10 +2865,17 @@ class Handler(BaseHTTPRequestHandler):
                 inv = self.auth.get_invite(token)
                 if inv:  # single-use: the address is fixed by the inviter
                     viewer = self._viewer()
+                    # "join" needs no password (the session is the proof);
+                    # "login" bounces through sign-in; "new" shows the password
+                    # field. An unverified row is a claim, not an account, so
+                    # it gets "new": the password typed here takes it over, and
+                    # hiding the field would leave the invite unacceptable.
                     mode = "new"
                     if self.auth.get_user(inv["email"]):
-                        mode = "join" if viewer and viewer["email"] == inv["email"] \
-                            else "login"
+                        if viewer and viewer["email"] == inv["email"]:
+                            mode = "join"
+                        elif self.auth.is_verified(inv["email"]):
+                            mode = "login"
                     self._page("invite.html", {"TOKEN": token, "EMAIL": inv["email"],
                                                "FIXED": "1", "HINT": "", "MODE": mode,
                                                "ORG": inv["org_name"] or inv["org_slug"],

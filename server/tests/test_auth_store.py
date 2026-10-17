@@ -595,6 +595,69 @@ def test_removing_a_user_forgets_their_verification():
     print("    row and cache gone; a re-registration is unverified")
 
 
+def test_a_takeover_inherits_nothing_the_squatter_acquired():
+    """mallory pre-registers victim@corp through her own team link, so the
+    row is an unverified member of mallory's org. When the victim registers,
+    the takeover must drop that membership (and any admin grant, and the
+    active org): otherwise the victim lands in mallory's org and every
+    collector report goes where mallory can read it."""
+    print("a takeover drops the squatter's memberships:")
+    auth, db = verifying_store()
+    auth.create_account("mallory@x.dev", "hunter2hunter2")
+    auth.mark_verified("mallory@x.dev")
+    auth.create_org_for("mallory@x.dev", "Evil Corp")
+    link = auth.create_team_invite("evil-corp", "mallory@x.dev")
+    auth.accept_team_invite(link, "victim@corp.dev", "squatpass")
+    auth.set_admin("victim@corp.dev", "evil-corp")
+    assert "evil-corp" in auth.memberships("victim@corp.dev")
+    auth.create_account("victim@corp.dev", "ownerpassword")
+    assert auth.memberships("victim@corp.dev") == set(), "membership dropped"
+    assert not auth.is_admin("victim@corp.dev", "evil-corp"), "admin grant dropped"
+    assert auth.get_user("victim@corp.dev")["org_slug"] == "", "no active org"
+    assert auth.login("victim@corp.dev", "ownerpassword")
+    # an invite-driven takeover still joins the inviting org afterwards
+    tok = auth.create_invite("bob@corp.dev", "acme-inc", "ada@x.dev")
+    auth.accept_team_invite(link, "bob@corp.dev", "squatpass")
+    auth.accept_invite(tok, password="bobsrealpass")
+    assert auth.memberships("bob@corp.dev") == {"acme-inc"}, auth.memberships("bob@corp.dev")
+    print("    victim is in no org; an invite takeover joins only the inviting org")
+
+
+def test_a_signed_in_unverified_account_joins_through_a_single_use_invite():
+    """bob registers (unverified), then an admin invites him. Signed in as
+    bob, accepting is a plain join -- no password, no takeover that would
+    sign him out. Signed in as someone else it is still a takeover."""
+    print("single-use invite for an unverified, signed-in account:")
+    auth, db = verifying_store()
+    auth.create_account("bob@x.dev", "hunter2hunter2")
+    session = auth.login("bob@x.dev", "hunter2hunter2")
+    tok = auth.create_invite("bob@x.dev", "acme-inc", "ada@x.dev")
+    auth.accept_invite(tok, as_user="bob@x.dev")
+    assert "acme-inc" in auth.memberships("bob@x.dev")
+    assert auth.user_for_token(session), "joining did not sign bob out"
+    assert auth.login("bob@x.dev", "hunter2hunter2"), "password unchanged"
+    print("    joined without a password, session intact")
+
+
+def test_a_verified_answer_expires_from_the_cache():
+    """Another instance deletes the user; this one must stop answering True
+    once its entry ages out, or the next registrant of the address inherits
+    verification without holding the mailbox."""
+    print("positive verification cache expires:")
+    auth, db = verifying_store()
+    auth.create_account("bob@x.dev", "hunter2hunter2")
+    auth.mark_verified("bob@x.dev")
+    assert auth.is_verified("bob@x.dev")
+    # the delete happens elsewhere: the row goes, this instance's cache stays
+    db.tables["verified_emails"] = [r for r in db.tables["verified_emails"]
+                                    if r["email"] != "bob@x.dev"]
+    assert auth.is_verified("bob@x.dev"), "still cached for now"
+    ok, at = auth.verified_cache["bob@x.dev"]
+    auth.verified_cache["bob@x.dev"] = (ok, at - auth.VERIFIED_TTL - 1)
+    assert not auth.is_verified("bob@x.dev"), "re-read after the TTL"
+    print(f"    True served from cache, then re-read after {auth.VERIFIED_TTL}s")
+
+
 def test_the_admin_listing_hands_out_no_collector_token():
     """The admin page is JSON in a browser tab. A collector token in it is a
     live credential for reporting (and, with `read`, for the whole org's usage)
