@@ -69,7 +69,19 @@
   // Switching changes the ACTIVE org server-side (dashboard + ingest routing),
   // then reloads so every view re-reads it.
   fetch('/api/orgs').then((r) => (r.ok ? r.json() : null)).then((d) => {
-    if (!d || !d.orgs || d.orgs.length < 2) return;
+    if (!d) return;
+    // System: the platform views, drawn only for the account that has them.
+    // The server refuses everyone else regardless; this just keeps a link
+    // that would bounce out of everyone else's header.
+    if (d.isSystemAdmin) {
+      links.append(node('a', {
+        class: 'navlink navsys' + (current === 'system' ? ' current' : ''),
+        href: '/system',
+        text: 'System',
+        ...(current === 'system' ? { 'aria-current': 'page' } : {}),
+      }));
+    }
+    if (!d.orgs || d.orgs.length < 2) return;
     orgList.append(node('div', { class: 'menu-email', text: 'Switch organization' }));
     for (const o of d.orgs) {
       const isActive = o.slug === d.active;

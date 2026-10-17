@@ -98,6 +98,14 @@ class StatefulSysDb:
     def rows(self, query):
         import re
         flat = " ".join(query.split())
+        if "COUNT(DISTINCT email) AS members" in flat:
+            # all_orgs: one row per org_slug across users + org_memberships
+            seen = {}
+            for t in ("users", "org_memberships"):
+                for r in self.tables[t]:
+                    if r.get("org_slug"):
+                        seen.setdefault(r["org_slug"], set()).add(r["email"])
+            return [{"org_slug": k, "members": len(v)} for k, v in seen.items()]
         table = re.search(r"FROM \S+\.public\.(\w+)", flat).group(1)
         out = [dict(r) for r in self.tables[table]]
         by_slug = {o["slug"]: o for o in self.tables["orgs"]}

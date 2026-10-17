@@ -1,7 +1,8 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
-// Organization admin: members, invites, signed-in collectors.
+// Organization admin: members, invites, signed-in collectors. Platform-wide
+// views (every organization) live on /system, for the system admin only.
 // Everything here is org-scoped server-side; this page only draws what
 // /api/admin/state returns for the logged-in viewer.
 // ---------------------------------------------------------------------------
@@ -35,7 +36,7 @@ function clearPlaceholders() {
 // An error belongs beside the control that raised it: the banner at the top of
 // the page is off-screen by the time someone is acting on the third card.
 // '#err' remains the fallback, and is where a failed page load reports.
-const ERROR_BOXES = ['#err', '#inviteErr', '#orgErr'];
+const ERROR_BOXES = ['#err', '#inviteErr'];
 
 function clearErrors() {
   for (const sel of ERROR_BOXES) {
@@ -225,24 +226,6 @@ function renderCollectors() {
   }
 }
 
-function renderOrgs() {
-  const t = tbody('#orgs');
-  t.replaceChildren();
-  const orgs = state.allOrgs || [];
-  for (const o of orgs) {
-    const controls = el('div', { class: 'rowactions' });
-    if (!o.members && o.slug !== state.org.slug) {
-      controls.append(action('Delete', true, () => {
-        if (!confirm(`Delete '${o.slug}'? Its database is kept.`)) return;
-        act(() => api('/api/admin/delete-org', { slug: o.slug }), '#orgErr');
-      }));
-    }
-    t.append(row(
-      o.name + (o.slug === state.org.slug ? ' (yours)' : ''),
-      o.slug, String(o.members), day(o.created_at), controls));
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Invite dialog: both link kinds behind one action.
 // ---------------------------------------------------------------------------
@@ -300,11 +283,8 @@ async function load() {
   $('#orgName').disabled = !admin;
   $('#orgSave').disabled = !admin;
   for (const n of document.querySelectorAll('.adminonly')) n.hidden = !admin;
-  const sys = !!state.viewer.isSystemAdmin;
-  for (const n of document.querySelectorAll('.sysonly')) n.hidden = !sys;
   renderMembers();
   if (admin) { renderInvites(); renderCollectors(); }
-  if (sys) renderOrgs();
 }
 
 // ---------------------------------------------------------------------------
@@ -347,28 +327,12 @@ $('#inviteCreate').addEventListener('click', async () => {
   }
 });
 
-$('#orgCreate').addEventListener('click', () => act(async () => {
-  const r = await api('/api/admin/create-org', {
-    name: $('#newOrgName').value.trim(),
-    owner_email: $('#newOrgOwner').value.trim(),
-  });
-  $('#newOrgName').value = ''; $('#newOrgOwner').value = '';
-  $('#orgLinkOut').hidden = true;  // never show a previous org's link
-  if (r.invite_link) {
-    $('#orgLinkValue').value = r.invite_link;
-    $('#orgLinkValue').title = 'send this to the owner; they join as the org admin';
-    $('#orgLinkOut').hidden = false;
-    $('#orgLinkValue').select();
-  }
-}, '#orgErr'));
-
 function copyField(sel) {
   const f = $(sel);
   f.select();
   if (navigator.clipboard) navigator.clipboard.writeText(f.value);
   else document.execCommand('copy');
 }
-$('#orgLinkCopy').addEventListener('click', () => copyField('#orgLinkValue'));
 $('#linkCopy').addEventListener('click', () => copyField('#linkValue'));
 
 load().catch((e) => showError(e.message));

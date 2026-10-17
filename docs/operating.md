@@ -181,10 +181,14 @@ run somewhat more. Nothing here prices anything or writes to hotdata.
 ## Platform operators (system admins)
 
 Creating or deleting an organization provisions or strands a hotdata database,
-so it is a platform power, distinct from org admin. System admins get an **All
-organizations** card on `/admin`: every org with member counts, a create form
+so it is a platform power, distinct from org admin. The system admin gets a
+**System** item in the top nav (drawn for nobody else; `/api/orgs` says who)
+leading to `/system`, the home for platform-level views: totals across the
+server and **All organizations** -- every org with member counts, a create form
 (optionally with an owner email, which mints an invite whose acceptor becomes
-that org's admin), and delete for empty orgs.
+that org's admin), and delete for empty orgs. The page and its read,
+`/api/system/state`, refuse everyone but a system admin (redirect and 403
+respectively); the Organization page is about one team only.
 
 ```bash
 .venv/bin/python server/server.py makesysadmin eddie@hotdata.dev

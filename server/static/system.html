@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>hototel - system</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="/static/icon.svg">
+  <link rel="stylesheet" href="/static/admin.css">
+</head>
+<body data-page="system">
+  <header class="top"></header>
+  <div class="wrap">
+    <div class="modal-err" id="err" hidden></div>
+
+    <!-- Platform-level views: what the whole server holds, across every
+         organization. Only the system admin reaches this page; the server
+         sends everyone else to their dashboard. The Organization page stays
+         about one team. -->
+    <div class="card">
+      <div class="card-head">
+        <h2>Platform</h2>
+        <span class="spacer"></span>
+        <span class="flabel">System admin</span>
+      </div>
+      <div class="totals" id="totals">
+        <div class="total"><span class="num" id="totOrgs">&nbsp;</span><span class="lbl">organizations</span></div>
+        <div class="total"><span class="num" id="totMembers">&nbsp;</span><span class="lbl">members</span></div>
+        <div class="total"><span class="num" id="totEmpty">&nbsp;</span><span class="lbl">empty organizations</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>All organizations</h2>
+        <span class="spacer"></span>
+        <span class="flabel" id="orgCount"></span>
+      </div>
+      <div class="scroller">
+        <table class="admintable" id="orgs">
+          <thead>
+            <tr class="head"><th>Organization</th><th>Slug</th><th>Members</th><th>Created</th><th></th></tr>
+          </thead>
+          <tbody>
+            <tr class="placeholder"><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td></td></tr>
+            <tr class="placeholder"><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td></td></tr>
+            <tr class="placeholder"><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td><div class="skel skel-cell"></div></td><td></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="cardfoot">
+        <input id="newOrgName" type="text" placeholder="Organization name"
+               aria-label="Organization name">
+        <input id="newOrgOwner" type="email" placeholder="Owner email (optional)"
+               aria-label="Owner email (optional)">
+        <button class="refresh primary" id="orgCreate" type="button">Create organization</button>
+      </div>
+      <div class="modal-err" id="orgErr" hidden></div>
+      <div class="linkout" id="orgLinkOut" hidden>
+        <input id="orgLinkValue" readonly aria-label="Invite link for the new organization's owner">
+        <button class="refresh" id="orgLinkCopy" type="button">Copy</button>
+      </div>
+    </div>
+
+    <footer class="foot">
+      Creating an organization provisions a database; deleting one keeps it.
+      Only empty organizations can be deleted, and never your own.
+    </footer>
+  </div>
+  <script src="/static/nav.js"></script>
+  <script src="/static/system.js"></script>
+</body>
+</html>

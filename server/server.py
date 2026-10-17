@@ -2951,6 +2951,21 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._static("admin.html")
                 return
+            if path == "/system":
+                # platform views: one account on the server has them. Anyone
+                # else is sent to their dashboard rather than shown a 403 page
+                # -- there is nothing for them to do here.
+                viewer = self._viewer()
+                if not viewer:
+                    self._redirect("/login?next=" + quote(self.path))
+                    return
+                if self._gated_on_verify(viewer, path):
+                    return
+                if not self.auth.is_system_admin(viewer["email"]):
+                    self._redirect("/")
+                    return
+                self._static("system.html")
+                return
             if path == "/device":
                 q = parse_qs(parsed.query)
                 viewer = self._viewer()
@@ -3086,6 +3101,22 @@ class Handler(BaseHTTPRequestHandler):
                     self._send(200, body, "application/json", gzipped=True)
                 else:
                     self._json(self._org_payload(viewer, fresh=fresh, days=days))
+            elif path == "/api/system/state":
+                # the platform view: every organization with its member count.
+                # Gated on system admin, not org admin -- an org admin runs one
+                # team and has no business seeing the others' names and sizes.
+                if not self.auth.is_system_admin(viewer["email"]):
+                    self._json({"error": "only a system admin can see this"}, 403)
+                    return
+                orgs = self.auth.all_orgs()
+                self._json({
+                    "viewer": {"email": viewer["email"], "org": viewer.get("org_name"),
+                               "orgSlug": viewer["org_slug"]},
+                    "orgs": orgs,
+                    "totals": {"organizations": len(orgs),
+                               "members": sum(o["members"] for o in orgs),
+                               "empty": sum(1 for o in orgs if not o["members"])},
+                })
             elif path == "/api/admin/state":
                 org, email = viewer["org_slug"], viewer["email"]
                 # the privileged reads stay behind the role checks, so this is
@@ -3093,9 +3124,9 @@ class Handler(BaseHTTPRequestHandler):
                 # then the reads that answer depends on it. Wave one is a
                 # roster read, which already carries the admin set and the
                 # active emails that wave two would otherwise re-query.
-                who = gather(is_sysadmin=lambda: self.auth.is_system_admin(email),
-                             roster=lambda: self.auth.roster(org))
-                roster = who["roster"]
+                # (the platform-wide list used to ride along here for system
+                # admins; it has its own page and read now, /system)
+                roster = self.auth.roster(org)
                 is_admin = email in roster["admins"]
                 payload = {
                     "viewer": {"email": email, "isAdmin": is_admin},
@@ -3107,9 +3138,6 @@ class Handler(BaseHTTPRequestHandler):
                     extra["invites"] = lambda: self.auth.org_invites(org)
                     extra["collectors"] = lambda: self.auth.org_collectors(
                         org, active=roster["active"])
-                if who["is_sysadmin"]:
-                    extra["allOrgs"] = lambda: self.auth.all_orgs()
-                    payload["viewer"]["isSystemAdmin"] = True
                 payload.update(gather(extra))
                 self._json(payload)
             elif path == "/api/orgs":
@@ -3117,7 +3145,10 @@ class Handler(BaseHTTPRequestHandler):
                 found = gather({s: (lambda s=s: self.auth.get_org(s)) for s in slugs})
                 orgs = [{"slug": s, "name": (found[s] or {}).get("name") or s}
                         for s in slugs]
-                self._json({"active": viewer["org_slug"], "orgs": orgs})
+                # the nav draws the System link from this, so the one answer
+                # it already fetches decides it; a bare yes/no is all it needs
+                self._json({"active": viewer["org_slug"], "orgs": orgs,
+                            "isSystemAdmin": self.auth.is_system_admin(viewer["email"])})
             elif path == "/api/status":
                 self._json({"ok": True, "org": viewer["org_slug"]})
             elif path.startswith("/api/session/"):
