@@ -255,6 +255,36 @@ def test_an_unverified_invitee_accepts_their_own_invite_without_a_password():
         AUTH.verification = False
 
 
+def test_an_unverified_member_joins_through_a_team_link_without_a_password():
+    """Same person, reusable team link: signed in and unverified, bob types
+    his own address and leaves the password blank as the page tells him to.
+    That must be a plain join that keeps his session, not a takeover of his
+    own account (which would set whatever he typed as the password, since
+    the handler no longer length-checks it, and sign him out)."""
+    print("unverified member, signed in, joins through a team link:")
+    ada = signed_up("ada-team@x.dev", "Team Co")
+    org = AUTH.user_for_token(ada.cookies["hotusage_session"])["org_slug"]
+    AUTH.verification = True
+    try:
+        server.Handler._rate.clear()
+        bob = Browser()
+        bob.go("/register", {"email": "bob-team@x.dev", "password": "hunter2hunter2"})
+        session = bob.cookies.get("hotusage_session")
+        assert session and not AUTH.is_verified("bob-team@x.dev")
+        link = AUTH.create_team_invite(org, "ada-team@x.dev")
+        status, loc, _ = bob.go(f"/invite/{link}", {"email": "bob-team@x.dev", "password": ""})
+        assert status == 302 and loc == "/", (status, loc)
+        assert org in AUTH.memberships("bob-team@x.dev"), AUTH.memberships("bob-team@x.dev")
+        assert AUTH.user_for_token(session), "bob was signed out"
+        assert AUTH.login("bob-team@x.dev", "hunter2hunter2"), "password changed"
+        # and a short password typed anyway is not installed as his new one
+        status, loc, _ = bob.go(f"/invite/{link}", {"email": "bob-team@x.dev", "password": "a"})
+        assert AUTH.login("bob-team@x.dev", "a") is None, "a 1-char password took over"
+        print("    302 to /, member, session and password intact")
+    finally:
+        AUTH.verification = False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

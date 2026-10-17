@@ -1257,7 +1257,11 @@ class AuthStore:
         if inv["domain"] and email.rsplit("@", 1)[1] != inv["domain"]:
             raise ValueError(f"this link only accepts @{inv['domain']} addresses")
         user = self.get_user(email)
-        if user and self.verification and not self.is_verified(email):
+        # signed in as the address, the session already proved the password:
+        # that is a plain join (the elif below), not a takeover of oneself
+        signed_in_as = (as_user or "").strip().lower() == email
+        if user and self.verification and not self.is_verified(email) \
+                and not signed_in_as:
             # same takeover as accept_invite: the row is a claim until the
             # mailbox confirms it, and the domain check above is only worth
             # anything because of that
