@@ -109,10 +109,20 @@ class FakeEngine:
     def __init__(self):
         self.chats = []
 
+    starting = False
+
+    woke = 0
+
     def status(self):
-        return {"enabled": True, "model": self.model_name, "windowDays": 30}
+        return {"enabled": True, "model": self.model_name, "windowDays": 30,
+                "modelState": "starting" if self.starting else "ready"}
+
+    def wake(self):
+        self.woke += 1
 
     def chat(self, database_id, org_name, history):
+        if self.starting:
+            raise insights.ModelStarting()
         self.chats.append((database_id, org_name, history))
         return {"answer": f"**{org_name}**: {len(history)} turns",
                 "steps": [{"tool": "hotdata_execute_sql", "sql": "SELECT 1", "rows": 1,
@@ -189,6 +199,94 @@ def test_chat_runs_for_a_signed_in_member():
         d = json.loads(raw)
         assert status == 200 and d["status"] == "pending" and d["fresh"] is True, d
         print("    takeaways: fresh=1 reaches the engine")
+    finally:
+        server.Handler.insights = None
+
+
+def test_a_cold_model_is_a_503_the_page_can_wait_on():
+    """The Modal endpoint scales to zero and refuses with 503 while a
+    container boots. That must reach the page as 'starting', not as the
+    generic failure, so it can wait and resend instead of giving up."""
+    engine = FakeEngine()
+    engine.starting = True
+    server.Handler.insights = engine
+    try:
+        status, raw = call(BASE, "/api/insights/status", headers=AS_ADA)
+        assert status == 200 and json.loads(raw)["modelState"] == "starting", raw[:200]
+        status, raw = call(BASE, "/api/insights/chat", method="POST", headers=AS_ADA,
+                           body={"messages": [{"role": "user", "content": "who?"}]})
+        d = json.loads(raw)
+        assert status == 503 and d.get("starting") is True, (status, d)
+        assert engine.chats == [], "nothing ran"
+        print("cold model: status says starting, chat is a 503 with starting=true")
+    finally:
+        server.Handler.insights = None
+
+
+def test_the_engine_tells_a_cold_start_from_a_failure():
+    """model_state probes /health beside /v1 and caches briefly; a 503 from
+    the client is a cold start, anything else is an error."""
+    import http.server
+    import threading as th
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        code = 404
+        def do_GET(self):
+            self.send_response(self.code); self.end_headers()
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Health)
+    th.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
+    eng = insights.InsightsEngine.__new__(insights.InsightsEngine)
+    eng._lock = th.Lock()
+    eng.base_url = "http://127.0.0.1:9/v1"   # nothing listens: the probe fails fast
+    eng._health = (None, 0.0)
+    assert eng.model_state() == "starting"
+    # a host with no /health route answers 404: it is up, so the request goes out
+    eng.base_url = f"http://127.0.0.1:{port}/v1"
+    eng._health = (None, 0.0)
+    assert eng.model_state() == "ready", "a 404 from /health is an answer, not a cold start"
+    Health.code = 503
+    eng._health = (None, 0.0)
+    assert eng.model_state() == "starting", "503 is Modal with nothing running"
+    httpd.shutdown()
+    eng._health = (True, __import__("time").time())
+    assert eng.model_state() == "ready", "a fresh positive probe is trusted"
+    eng.base_url = ""
+    assert eng.model_state() == "ready", "a hosted API is always up"
+
+    class Err(Exception):
+        status_code = 503
+    assert insights.InsightsEngine._is_cold_start(Err())
+    assert not insights.InsightsEngine._is_cold_start(RuntimeError("x"))
+    print("engine: unreachable -> starting; 404 /health -> ready; 503 -> starting; cached ready trusted")
+
+
+def test_signing_in_wakes_the_model():
+    """The model runs only while people are around, so a sign-in is what
+    starts its cold boot; a failed sign-in must not."""
+    import urllib.parse
+    import urllib.request
+    engine = FakeEngine()
+    server.Handler.insights = engine
+    server.Handler._rate.clear()
+    try:
+        def post(pw):
+            body = urllib.parse.urlencode({"email": "ada@x.dev", "password": pw}).encode()
+            req = urllib.request.Request(BASE + "/login", data=body, method="POST",
+                                         headers={"Content-Type": "application/x-www-form-urlencoded"})
+            try:
+                urllib.request.urlopen(req, timeout=10).read()
+            except urllib.error.HTTPError:
+                pass
+        post("wrong-password")
+        assert engine.woke == 0, "a failed sign-in woke the model"
+        post("hunter2hunter2")
+        assert engine.woke == 1, engine.woke
+        print("a successful sign-in wakes the model once; a failed one does not")
     finally:
         server.Handler.insights = None
 

@@ -29,6 +29,8 @@ import re
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 
 import core
@@ -245,6 +247,20 @@ def validate_history(raw):
     return out
 
 
+class ModelStarting(Exception):
+    """The model endpoint has no running container yet. Modal's endpoint
+    answers 503 while the GPU container cold-starts (a few minutes for this
+    model), and that first refused request is what starts it. Callers wait
+    or tell the page to come back, rather than report a failure."""
+
+
+# How long a cold start may take before it is treated as an outage. Weights
+# are cached in a volume, so a boot is ~3 minutes when the volume reads well
+# and has been seen to take 15+ when it does not; the Modal class allows 30.
+MODEL_START_TIMEOUT = 20 * 60
+MODEL_HEALTH_TTL = 5
+
+
 class InsightsEngine:
     """One per process. Holds the hotdata client, a per-database tool set and
     agent, and the takeaways cache. All public methods are thread-safe."""
@@ -266,6 +282,7 @@ class InsightsEngine:
         self._slots = threading.BoundedSemaphore(max_concurrent)
         self._takeaways = {}         # database_id -> {"at", "data"|"error", ...}
         self._generating = set()     # database_ids with a run in flight
+        self._health = (None, 0.0)   # (ready: bool|None, checked_at)
 
     # -- availability -------------------------------------------------------
 
@@ -307,7 +324,64 @@ class InsightsEngine:
 
     def status(self):
         return {"enabled": True, "model": self.model_name, "provider": self.provider,
-                "windowDays": TAKEAWAYS_WINDOW_DAYS}
+                "windowDays": TAKEAWAYS_WINDOW_DAYS, "modelState": self.model_state()}
+
+    # -- the endpoint's cold start -------------------------------------------
+
+    def model_state(self):
+        """'ready' or 'starting'; always 'ready' for a hosted API. Cached a
+        few seconds: the page and its polls ask often. The health probe
+        itself is what wakes a scaled-to-zero endpoint, so asking is also
+        the way to make it ready -- the page's first status call does it."""
+        if not self.base_url:
+            return "ready"
+        now = time.time()
+        with self._lock:
+            ready, at = self._health
+        if ready is not None and now - at < MODEL_HEALTH_TTL:
+            return "ready" if ready else "starting"
+        ready = self._probe()
+        with self._lock:
+            self._health = (ready, time.time())
+        return "ready" if ready else "starting"
+
+    def _probe(self):
+        """Is something answering behind the endpoint? vLLM's /health sits
+        beside /v1 and needs no key. Only Modal's 503 while nothing runs, or
+        no connection at all, mean "starting": another OpenAI-compatible
+        host without a /health route answers 404 and is up."""
+        url = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+        try:
+            with urllib.request.urlopen(url + "/health", timeout=10) as r:
+                return r.status < 500
+        except urllib.error.HTTPError as e:
+            return e.code != 503
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return False
+
+    def wake(self):
+        """Start the model booting without waiting on it. Called when someone
+        signs in: the container only runs while people are around, so the
+        sign-in is the earliest moment to pay the cold start, and it is then
+        a few minutes along by the time they open Insights. It still scales
+        to zero after the idle window; nothing here keeps it up."""
+        if self.base_url:
+            threading.Thread(target=self.model_state, daemon=True,
+                             name="insights-wake").start()
+
+    def wait_ready(self, timeout=MODEL_START_TIMEOUT):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.model_state() == "ready":
+                return True
+            time.sleep(10)
+        return False
+
+    @staticmethod
+    def _is_cold_start(exc):
+        # openai.APIStatusError (what ChatOpenAI raises) carries status_code;
+        # Modal's proxy says 503 "no upstreams available" while nothing runs
+        return getattr(exc, "status_code", None) == 503
 
     def _model(self, effort):
         """The chat model for one effort level, on whichever provider is
@@ -369,9 +443,16 @@ class InsightsEngine:
         """One agent run. Returns (answer_text, steps)."""
         agent = self._agent(database_id, effort)
         messages = [("system", self._system(org_name))] + list(history)
-        with self._slots:
-            result = agent.invoke({"messages": messages},
-                                  config={"recursion_limit": MAX_TOOL_STEPS})
+        try:
+            with self._slots:
+                result = agent.invoke({"messages": messages},
+                                      config={"recursion_limit": MAX_TOOL_STEPS})
+        except Exception as e:
+            if self._is_cold_start(e):
+                with self._lock:
+                    self._health = (False, time.time())
+                raise ModelStarting(str(e)[:200]) from e
+            raise
         return _unpack(result.get("messages") or [])
 
     # -- chat ---------------------------------------------------------------
@@ -379,6 +460,8 @@ class InsightsEngine:
     def chat(self, database_id, org_name, history):
         """`history` is the validated (role, content) list. Returns the JSON
         the page renders: the answer plus the queries that produced it."""
+        # no readiness gate here: _run turns the endpoint's 503 into
+        # ModelStarting, and a host without /health must still be asked
         answer, steps = self._run(database_id, org_name, history, self.chat_effort)
         return {"answer": answer, "steps": steps, "model": self.model_name}
 
@@ -400,6 +483,10 @@ class InsightsEngine:
                                  daemon=True, name=f"takeaways-{database_id[:8]}").start()
         out = {"status": "pending", "refreshing": running,
                "windowDays": TAKEAWAYS_WINDOW_DAYS, "model": self.model_name}
+        if running:
+            # cached, so a poll every ten seconds costs nothing; tells the
+            # page whether the wait is the model booting or the analysis
+            out["modelState"] = self.model_state()
         if entry:
             out.update(entry)
             out["status"] = "error" if "error" in entry else "ready"
@@ -408,6 +495,10 @@ class InsightsEngine:
     def _generate(self, database_id, org_name):
         started = time.time()
         try:
+            # a background thread can afford to wait out a cold start; the
+            # page shows "starting the model" meanwhile
+            if not self.wait_ready():
+                raise ModelStarting(f"model not ready after {MODEL_START_TIMEOUT}s")
             answer, steps = self._run(database_id, org_name,
                                       [("user", TAKEAWAYS_PROMPT)], self.analysis_effort)
             data = parse_takeaways(answer)

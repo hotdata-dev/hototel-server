@@ -2317,6 +2317,8 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.3)  # soften brute force
             self._redirect("/login?err=1&next=" + quote(nxt))
             return
+        if self.insights:
+            self.insights.wake()  # a person is here: get the model booting
         self._redirect(nxt, extra=[("Set-Cookie", self._session_cookie(token))])
 
     def _handle_register(self):
@@ -2669,6 +2671,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json(self.insights.chat(
                     viewer["database_id"], viewer.get("org_name"), history))
+            except insights.ModelStarting:
+                # not a failure: the page waits and sends the question again
+                self._json({"error": "the model is starting up", "starting": True}, 503)
             except ValueError as e:
                 self._json({"error": str(e)}, 400)
             except Exception as e:
@@ -3074,6 +3079,8 @@ class Handler(BaseHTTPRequestHandler):
                 # packages or a model key explains itself instead of 503ing
                 who = {"email": viewer["email"], "org": viewer.get("org_name")}
                 if self.insights:
+                    # status() probes the model, and that probe is what wakes
+                    # a scaled-to-zero endpoint: opening the page starts it
                     self._json({**self.insights.status(), "viewer": who})
                 else:
                     self._json({"enabled": False, "viewer": who,

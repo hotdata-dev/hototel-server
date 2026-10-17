@@ -28,8 +28,28 @@ async function api(path, body) {
   });
   if (r.status === 401) { location.href = '/login?next=%2Finsights'; throw new Error('signed out'); }
   const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data.error || `request failed (${r.status})`);
+  if (!r.ok) {
+    const e = new Error(data.error || `request failed (${r.status})`);
+    e.starting = !!data.starting;  // the model is cold-starting, not broken
+    throw e;
+  }
   return data;
+}
+
+// The model scales to zero when idle and takes a few minutes to come back.
+// Opening the page wakes it; this waits for the server to say it is ready.
+const STARTING_NOTE = 'Starting the model. This usually takes a few minutes after it has been idle';
+const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
+
+async function waitForModel(onTick) {
+  const deadline = Date.now() + 20 * 60 * 1000;  // matches the server's MODEL_START_TIMEOUT
+  while (Date.now() < deadline) {
+    const st = await api('/api/insights/status').catch(() => null);
+    if (st && st.modelState !== 'starting') return true;
+    onTick();
+    await sleep(10000);
+  }
+  return false;
 }
 
 function timeShort(iso) {
@@ -167,7 +187,9 @@ function renderTakeaways(d) {
   for (const col of document.querySelectorAll('.takecol')) lists[col.dataset.kind] = col.querySelector('.takelist');
 
   if (d.status === 'pending') {
-    meta.textContent = 'analysing the last 30 days, usually one to three minutes';
+    meta.textContent = d.modelState === 'starting'
+      ? 'starting the model first, usually a few minutes'
+      : 'analysing the last 30 days, usually one to three minutes';
     for (const l of Object.values(lists)) {
       l.replaceChildren(el('div', { class: 'take skel skel-take' }), el('div', { class: 'take skel skel-take' }));
     }
@@ -184,7 +206,8 @@ function renderTakeaways(d) {
     return;
   }
   meta.textContent = `generated ${timeShort(d.generatedAt)}` +
-    (d.seconds ? ` in ${d.seconds}s` : '') + (d.refreshing ? ' · regenerating' : '');
+    (d.seconds ? ` in ${d.seconds}s` : '') +
+    (d.refreshing ? (d.modelState === 'starting' ? ' · starting the model to regenerate' : ' · regenerating') : '');
   $('#takeSummary').textContent = d.data.summary || '';
   for (const [kind, list] of Object.entries(lists)) {
     const items = (d.data.highlights || []).filter((h) => h.kind === kind);
@@ -266,7 +289,21 @@ async function ask(text) {
   placeholder.scrollIntoView({ block: 'nearest' });
   setBusy(true);
   try {
-    const d = await api('/api/insights/chat', { messages: chat.messages });
+    let d;
+    try {
+      d = await api('/api/insights/chat', { messages: chat.messages });
+    } catch (e) {
+      if (!e.starting) throw e;
+      // cold model: say so, wait for it, then send the same question once
+      const body = placeholder.querySelector('.body');
+      body.textContent = STARTING_NOTE;
+      const ok = await waitForModel(() => {
+        body.textContent = `${STARTING_NOTE}. Your question is sent automatically when it is ready`;
+      });
+      if (!ok) throw new Error('the model did not start; try again in a few minutes');
+      body.textContent = 'Querying';
+      d = await api('/api/insights/chat', { messages: chat.messages });
+    }
     placeholder.remove();
     addAssistant(d.answer || '(no answer)', d.steps, false).scrollIntoView({ block: 'nearest' });
     chat.messages.push({ role: 'assistant', content: d.answer || '' });

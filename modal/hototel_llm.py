@@ -70,7 +70,12 @@ app = modal.App("hototel")
     image=vllm_image,
     gpu=f"H100:{N_GPU}",
     scaledown_window=SCALEDOWN,
-    startup_timeout=15 * MINUTES,     # the first boot downloads ~60GB of weights
+    # Weights come off the volume at boot. Measured: ~3 minutes on a good
+    # day, but the volume's 9P mount has read the 57GB at ~60MB/s, which is
+    # 17 minutes -- a 15-minute limit killed that boot and the page saw only
+    # 503s. The limit is generous so a slow read finishes rather than restarts;
+    # the prefetch flag below is what makes it fast.
+    startup_timeout=30 * MINUTES,
     volumes={
         "/root/.cache/huggingface": hf_cache_vol,
         "/root/.cache/vllm": vllm_cache_vol,
@@ -102,6 +107,11 @@ class Server:
             # dozen query results -- fits comfortably; more only costs KV cache
             "--max-model-len", "32768",
             "--gpu-memory-utilization", "0.92",
+            # read the safetensors shards with parallel threads into the page
+            # cache before mapping them: the volume is a network filesystem
+            # (9P) whose single-stream reads are latency-bound, and vLLM only
+            # prefetches on its own for NFS/Lustre
+            "--safetensors-load-strategy", "prefetch",
             # tool calling: Qwen3 writes Hermes-style <tool_call> blocks
             "--enable-auto-tool-choice",
             "--tool-call-parser", "hermes",
