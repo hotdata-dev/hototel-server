@@ -199,6 +199,16 @@ TABLES = {
         "key": ["email"],
         "cols": [("email", "VARCHAR"), ("verified_at", "TIMESTAMPTZ")],
     },
+    # The Insights page's published takeaways, one row per org database. The
+    # analysis costs minutes of model time, so a finished one outlives the
+    # process that made it: a deploy, a restart or a second App Runner
+    # instance shows the last published analysis instead of a blank card.
+    # `payload` is the JSON the page renders (highlights + the queries run).
+    "insights_takeaways": {
+        "key": ["database_id"],
+        "cols": [("database_id", "VARCHAR"), ("generated_at", "TIMESTAMPTZ"),
+                 ("model", "VARCHAR"), ("seconds", "INTEGER"), ("payload", "VARCHAR")],
+    },
 }
 
 USAGE_TABLES = ("sessions", "requests", "daily_usage")
@@ -206,7 +216,7 @@ SYSTEM_TABLES = ("orgs", "users", "auth_sessions", "invites", "team_invites",
                  "device_codes", "device_scopes", "collector_tokens",
                  "collector_token_usage", "token_scopes",
                  "org_admins", "system_admins", "org_memberships",
-                 "email_verifications", "verified_emails")
+                 "email_verifications", "verified_emails", "insights_takeaways")
 
 
 # ---------------------------------------------------------------------------
@@ -3503,7 +3513,7 @@ def main():
               "is OFF: any address can register and no mailbox is ever proved",
               file=sys.stderr)
     Handler.token = token
-    Handler.insights = insights.InsightsEngine.from_env()
+    Handler.insights = insights.InsightsEngine.from_env(store=Handler.auth.sysdb)
     if Handler.insights:
         print(f"hototel server: insights page ON, model {Handler.insights.model_name}")
     Handler.allow_shared = os.environ.get("HOTUSAGE_ALLOW_SHARED_INGEST") == "1"
