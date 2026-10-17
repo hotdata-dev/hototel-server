@@ -329,10 +329,10 @@ class InsightsEngine:
     # -- the endpoint's cold start -------------------------------------------
 
     def model_state(self):
-        """'ready', 'starting' or 'ready' for a hosted API that is always up.
-        Cached a few seconds: the page and its polls ask often. The health
-        probe itself is what wakes a scaled-to-zero endpoint, so asking is
-        also the way to make it ready -- the page's first call does it."""
+        """'ready' or 'starting'; always 'ready' for a hosted API. Cached a
+        few seconds: the page and its polls ask often. The health probe
+        itself is what wakes a scaled-to-zero endpoint, so asking is also
+        the way to make it ready -- the page's first status call does it."""
         if not self.base_url:
             return "ready"
         now = time.time()
@@ -346,18 +346,18 @@ class InsightsEngine:
         return "ready" if ready else "starting"
 
     def _probe(self):
-        # vLLM's /health sits beside /v1 and needs no key
+        """Is something answering behind the endpoint? vLLM's /health sits
+        beside /v1 and needs no key. Only Modal's 503 while nothing runs, or
+        no connection at all, mean "starting": another OpenAI-compatible
+        host without a /health route answers 404 and is up."""
         url = self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
         try:
             with urllib.request.urlopen(url + "/health", timeout=10) as r:
-                return r.status == 200
+                return r.status < 500
+        except urllib.error.HTTPError as e:
+            return e.code != 503
         except (urllib.error.URLError, TimeoutError, OSError):
             return False
-
-    def warm(self):
-        """Kick the cold start without waiting on it."""
-        if self.base_url:
-            threading.Thread(target=self.model_state, daemon=True, name="insights-warm").start()
 
     def wait_ready(self, timeout=MODEL_START_TIMEOUT):
         deadline = time.time() + timeout
@@ -441,7 +441,7 @@ class InsightsEngine:
             if self._is_cold_start(e):
                 with self._lock:
                     self._health = (False, time.time())
-                raise ModelStarting() from e
+                raise ModelStarting(str(e)[:200]) from e
             raise
         return _unpack(result.get("messages") or [])
 
@@ -450,8 +450,8 @@ class InsightsEngine:
     def chat(self, database_id, org_name, history):
         """`history` is the validated (role, content) list. Returns the JSON
         the page renders: the answer plus the queries that produced it."""
-        if self.model_state() != "ready":
-            raise ModelStarting()
+        # no readiness gate here: _run turns the endpoint's 503 into
+        # ModelStarting, and a host without /health must still be asked
         answer, steps = self._run(database_id, org_name, history, self.chat_effort)
         return {"answer": answer, "steps": steps, "model": self.model_name}
 
@@ -488,7 +488,7 @@ class InsightsEngine:
             # a background thread can afford to wait out a cold start; the
             # page shows "starting the model" meanwhile
             if not self.wait_ready():
-                raise ModelStarting()
+                raise ModelStarting(f"model not ready after {MODEL_START_TIMEOUT}s")
             answer, steps = self._run(database_id, org_name,
                                       [("user", TAKEAWAYS_PROMPT)], self.analysis_effort)
             data = parse_takeaways(answer)

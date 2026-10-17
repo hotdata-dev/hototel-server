@@ -3077,9 +3077,8 @@ class Handler(BaseHTTPRequestHandler):
                 # packages or a model key explains itself instead of 503ing
                 who = {"email": viewer["email"], "org": viewer.get("org_name")}
                 if self.insights:
-                    # opening the page is the moment to wake a scaled-to-zero
-                    # model, so it is booting while the person reads or types
-                    self.insights.warm()
+                    # status() probes the model, and that probe is what wakes
+                    # a scaled-to-zero endpoint: opening the page starts it
                     self._json({**self.insights.status(), "viewer": who})
                 else:
                     self._json({"enabled": False, "viewer": who,

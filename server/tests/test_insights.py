@@ -115,9 +115,6 @@ class FakeEngine:
         return {"enabled": True, "model": self.model_name, "windowDays": 30,
                 "modelState": "starting" if self.starting else "ready"}
 
-    def warm(self):
-        pass
-
     def chat(self, database_id, org_name, history):
         if self.starting:
             raise insights.ModelStarting()
@@ -224,11 +221,33 @@ def test_a_cold_model_is_a_503_the_page_can_wait_on():
 def test_the_engine_tells_a_cold_start_from_a_failure():
     """model_state probes /health beside /v1 and caches briefly; a 503 from
     the client is a cold start, anything else is an error."""
+    import http.server
+    import threading as th
+
+    class Health(http.server.BaseHTTPRequestHandler):
+        code = 404
+        def do_GET(self):
+            self.send_response(self.code); self.end_headers()
+        def log_message(self, *a):
+            pass
+
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), Health)
+    th.Thread(target=httpd.serve_forever, daemon=True).start()
+    port = httpd.server_address[1]
+
     eng = insights.InsightsEngine.__new__(insights.InsightsEngine)
+    eng._lock = th.Lock()
     eng.base_url = "http://127.0.0.1:9/v1"   # nothing listens: the probe fails fast
-    eng._lock = __import__("threading").Lock()
     eng._health = (None, 0.0)
     assert eng.model_state() == "starting"
+    # a host with no /health route answers 404: it is up, so the request goes out
+    eng.base_url = f"http://127.0.0.1:{port}/v1"
+    eng._health = (None, 0.0)
+    assert eng.model_state() == "ready", "a 404 from /health is an answer, not a cold start"
+    Health.code = 503
+    eng._health = (None, 0.0)
+    assert eng.model_state() == "starting", "503 is Modal with nothing running"
+    httpd.shutdown()
     eng._health = (True, __import__("time").time())
     assert eng.model_state() == "ready", "a fresh positive probe is trusted"
     eng.base_url = ""
@@ -238,7 +257,7 @@ def test_the_engine_tells_a_cold_start_from_a_failure():
         status_code = 503
     assert insights.InsightsEngine._is_cold_start(Err())
     assert not insights.InsightsEngine._is_cold_start(RuntimeError("x"))
-    print("engine: unreachable endpoint -> starting; cached ready -> ready; 503 is a cold start")
+    print("engine: unreachable -> starting; 404 /health -> ready; 503 -> starting; cached ready trusted")
 
 
 def test_chat_refuses_everyone_but_a_cookie_session():

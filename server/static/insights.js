@@ -188,7 +188,7 @@ function renderTakeaways(d) {
 
   if (d.status === 'pending') {
     meta.textContent = d.modelState === 'starting'
-      ? 'starting the model first, two to three minutes'
+      ? 'starting the model first, usually a few minutes'
       : 'analysing the last 30 days, usually one to three minutes';
     for (const l of Object.values(lists)) {
       l.replaceChildren(el('div', { class: 'take skel skel-take' }), el('div', { class: 'take skel skel-take' }));
