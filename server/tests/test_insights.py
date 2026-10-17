@@ -13,6 +13,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -289,6 +290,43 @@ def test_signing_in_wakes_the_model():
         print("a successful sign-in wakes the model once; a failed one does not")
     finally:
         server.Handler.insights = None
+
+
+def test_published_takeaways_survive_the_process():
+    """A finished analysis is written to the system database and read back
+    by a fresh engine, so a deploy or a second instance shows the last
+    published takeaways instead of starting over."""
+    import threading as th
+    db = fakes.StatefulSysDb()
+    canned = json.dumps(GOOD)
+
+    def engine():
+        e = insights.InsightsEngine.__new__(insights.InsightsEngine)
+        e.store, e.model_name, e.base_url = db, "fake", ""
+        e.analysis_effort = "high"
+        e._lock, e._takeaways, e._generating = th.Lock(), {}, set()
+        e._health = (None, 0.0)
+        e._run = lambda *a, **k: (canned, [{"tool": "hotdata_execute_sql", "sql": "SELECT 1",
+                                           "rows": 1, "error": None, "table": None}])
+        return e
+
+    a = engine()
+    first = a.takeaways("dbid1", "Acme")
+    assert first["status"] == "pending", first
+    for _ in range(50):               # the generation thread is quick with a canned run
+        if a.takeaways("dbid1", "Acme")["status"] == "ready":
+            break
+        time.sleep(0.05)
+    saved = db.tables["insights_takeaways"]
+    assert len(saved) == 1 and saved[0]["database_id"] == "dbid1", saved
+    assert json.loads(saved[0]["payload"])["data"]["summary"] == "A busy month."
+
+    b = engine()                      # a new process: empty memory, same database
+    out = b.takeaways("dbid1", "Acme")
+    assert out["status"] == "ready" and out["refreshing"] is False, out
+    assert out["data"]["summary"] == "A busy month." and out["steps"][0]["sql"] == "SELECT 1"
+    assert "dbid1" not in b._generating, "a fresh, saved analysis must not be regenerated"
+    print("takeaways: saved on finish, read back by a fresh engine without a new run")
 
 
 def test_chat_refuses_everyone_but_a_cookie_session():

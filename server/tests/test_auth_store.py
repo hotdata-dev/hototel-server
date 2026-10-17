@@ -87,7 +87,8 @@ class StatefulSysDb:
             "collector_token_usage": ("token",), "auth_sessions": ("token",),
             "system_admins": ("email",), "invites": ("token",),
             "team_invites": ("token",),
-            "email_verifications": ("token",), "verified_emails": ("email",)}
+            "email_verifications": ("token",), "verified_emails": ("email",),
+            "insights_takeaways": ("database_id",)}
 
     def __init__(self, db="dbidsystem00000000000000"):
         self.db = db

@@ -270,7 +270,11 @@ class InsightsEngine:
     agent, and the takeaways cache. All public methods are thread-safe."""
 
     def __init__(self, model=None, chat_effort="medium", analysis_effort="high",
-                 max_concurrent=4):
+                 max_concurrent=4, store=None):
+        # `store` is the system database (AuthStore.sysdb): published
+        # takeaways are written there so they survive the process. None
+        # keeps everything in memory, which the tests use.
+        self.store = store
         self.base_url = os.environ.get("HOTOTEL_INSIGHTS_BASE_URL", "").rstrip("/")
         self.provider = "endpoint" if self.base_url else "anthropic"
         default = DEFAULT_ENDPOINT_MODEL if self.base_url else DEFAULT_ANTHROPIC_MODEL
@@ -318,13 +322,13 @@ class InsightsEngine:
         return None
 
     @classmethod
-    def from_env(cls):
+    def from_env(cls, store=None):
         """An engine, or None with the reason on stderr."""
         why = cls.missing_requirements()
         if why:
             print(f"warn: insights page is OFF: {why}", file=sys.stderr)
             return None
-        return cls()
+        return cls(store=store)
 
     def status(self):
         return {"enabled": True, "model": self.model_name, "provider": self.provider,
@@ -484,6 +488,15 @@ class InsightsEngine:
         now = time.time()
         with self._lock:
             entry = self._takeaways.get(database_id)
+        if entry is None and self.store is not None:
+            # first ask since this process started: the last published
+            # analysis, if any, is in the system database
+            entry = self._load_saved(database_id)
+            if entry:
+                with self._lock:
+                    self._takeaways.setdefault(database_id, entry)
+        with self._lock:
+            entry = self._takeaways.get(database_id, entry)
             stale = not entry or now - entry["at"] >= TAKEAWAYS_TTL
             running = database_id in self._generating
             if (fresh or stale) and not running:
@@ -514,6 +527,7 @@ class InsightsEngine:
             data = parse_takeaways(answer)
             entry = {"at": time.time(), "generatedAt": _now_iso(), "data": data,
                      "steps": steps, "seconds": round(time.time() - started)}
+            self._save(database_id, entry)
         except Exception as e:
             print(f"error: takeaways for {database_id}: {str(e)[:300]}", file=sys.stderr)
             # A failed run is cached briefly too, so a page that keeps polling
@@ -523,6 +537,54 @@ class InsightsEngine:
         with self._lock:
             self._takeaways[database_id] = entry
             self._generating.discard(database_id)
+
+    # -- the published analysis, across processes -----------------------------
+
+    TABLE = "insights_takeaways"
+
+    def _save(self, database_id, entry):
+        """Best effort: a write failure costs persistence, not the analysis."""
+        if self.store is None:
+            return
+        try:
+            self.store.load(self.TABLE, [{
+                "database_id": database_id,
+                "generated_at": entry["generatedAt"],
+                "model": self.model_name,
+                "seconds": int(entry.get("seconds") or 0),
+                "payload": json.dumps({"data": entry["data"], "steps": entry["steps"]}),
+            }], "upsert")
+        except Exception as e:
+            print(f"warn: takeaways for {database_id} not saved: {str(e)[:200]}",
+                  file=sys.stderr)
+
+    def _load_saved(self, database_id):
+        """The saved entry in the in-memory shape, or None."""
+        try:
+            rows = self.store.rows(
+                f"SELECT generated_at, model, seconds, payload "
+                f"FROM {core.SYSTEM_CATALOG}.public.{self.TABLE} "
+                f"WHERE database_id = '{database_id}'")
+        except Exception as e:
+            print(f"warn: takeaways for {database_id} not read: {str(e)[:200]}",
+                  file=sys.stderr)
+            return None
+        if not rows:
+            return None
+        r = rows[0]
+        try:
+            payload = json.loads(r["payload"]) if isinstance(r["payload"], str) else r["payload"]
+            when = r["generated_at"]
+            if not isinstance(when, datetime):
+                when = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            return {"at": when.timestamp(), "generatedAt": when.isoformat(),
+                    "data": payload["data"], "steps": payload.get("steps") or [],
+                    "seconds": int(r.get("seconds") or 0), "model": r.get("model")}
+        except (KeyError, TypeError, ValueError) as e:
+            print(f"warn: saved takeaways for {database_id} unreadable: {e}", file=sys.stderr)
+            return None
 
 
 def _unpack(messages):

@@ -179,8 +179,10 @@ start paid model runs:
   queries the agent ran. The server keeps no conversation state.
 - `GET /api/insights/takeaways` returns the cached 30-day analysis for the
   org, or `status: pending` while one generates in a background thread; the
-  page polls. `?fresh=1` starts a new run. The cache is in-process, so a
-  restart (or a second App Runner instance) regenerates on first view.
+  page polls. `?fresh=1` starts a new run. A finished analysis is written to
+  the system database (`insights_takeaways`, one row per org database), so a
+  restart, a deploy or a second App Runner instance shows the last published
+  takeaways on first view and only regenerates once they are six hours old.
 
 Both count against one per-IP limit (`Handler.CHAT_RATE_LIMIT`, 60 runs an
 hour), and at most four agent runs execute at once per process so a burst of
