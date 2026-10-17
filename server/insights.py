@@ -545,9 +545,12 @@ def _unpack(messages):
                         "rows": None, "error": None}
                 steps.append(step)
                 by_id[call.get("id")] = step
-            text = getattr(m, "text", "")
-            if callable(text):
-                text = text()
+            # AIMessage.text is a property; it returns a str subclass that
+            # still answers a call for old code, with a deprecation warning,
+            # so a callable() check here would walk straight into that
+            text = getattr(m, "text", None)
+            if not isinstance(text, str):
+                text = m.content if isinstance(m.content, str) else ""
             if text and text.strip():
                 answer = text.strip()
         elif mtype == "tool":
