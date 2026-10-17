@@ -359,6 +359,16 @@ class InsightsEngine:
         except (urllib.error.URLError, TimeoutError, OSError):
             return False
 
+    def wake(self):
+        """Start the model booting without waiting on it. Called when someone
+        signs in: the container only runs while people are around, so the
+        sign-in is the earliest moment to pay the cold start, and it is then
+        a few minutes along by the time they open Insights. It still scales
+        to zero after the idle window; nothing here keeps it up."""
+        if self.base_url:
+            threading.Thread(target=self.model_state, daemon=True,
+                             name="insights-wake").start()
+
     def wait_ready(self, timeout=MODEL_START_TIMEOUT):
         deadline = time.time() + timeout
         while time.time() < deadline:

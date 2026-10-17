@@ -2317,6 +2317,8 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.3)  # soften brute force
             self._redirect("/login?err=1&next=" + quote(nxt))
             return
+        if self.insights:
+            self.insights.wake()  # a person is here: get the model booting
         self._redirect(nxt, extra=[("Set-Cookie", self._session_cookie(token))])
 
     def _handle_register(self):

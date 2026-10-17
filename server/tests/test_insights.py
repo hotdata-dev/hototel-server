@@ -111,9 +111,14 @@ class FakeEngine:
 
     starting = False
 
+    woke = 0
+
     def status(self):
         return {"enabled": True, "model": self.model_name, "windowDays": 30,
                 "modelState": "starting" if self.starting else "ready"}
+
+    def wake(self):
+        self.woke += 1
 
     def chat(self, database_id, org_name, history):
         if self.starting:
@@ -258,6 +263,32 @@ def test_the_engine_tells_a_cold_start_from_a_failure():
     assert insights.InsightsEngine._is_cold_start(Err())
     assert not insights.InsightsEngine._is_cold_start(RuntimeError("x"))
     print("engine: unreachable -> starting; 404 /health -> ready; 503 -> starting; cached ready trusted")
+
+
+def test_signing_in_wakes_the_model():
+    """The model runs only while people are around, so a sign-in is what
+    starts its cold boot; a failed sign-in must not."""
+    import urllib.parse
+    import urllib.request
+    engine = FakeEngine()
+    server.Handler.insights = engine
+    server.Handler._rate.clear()
+    try:
+        def post(pw):
+            body = urllib.parse.urlencode({"email": "ada@x.dev", "password": pw}).encode()
+            req = urllib.request.Request(BASE + "/login", data=body, method="POST",
+                                         headers={"Content-Type": "application/x-www-form-urlencoded"})
+            try:
+                urllib.request.urlopen(req, timeout=10).read()
+            except urllib.error.HTTPError:
+                pass
+        post("wrong-password")
+        assert engine.woke == 0, "a failed sign-in woke the model"
+        post("hunter2hunter2")
+        assert engine.woke == 1, engine.woke
+        print("a successful sign-in wakes the model once; a failed one does not")
+    finally:
+        server.Handler.insights = None
 
 
 def test_chat_refuses_everyone_but_a_cookie_session():
