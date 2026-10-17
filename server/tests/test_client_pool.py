@@ -48,6 +48,41 @@ sys.modules["hotdata"] = fake_hotdata
 import server  # noqa: E402
 
 
+def test_only_a_400_reads_as_an_empty_table():
+    """hotdata says "not found" both for a table with no rows (HTTP 400) and
+    for a database that is not there (HTTP 404). Only the first is an empty
+    result; the second must propagate, or every "is this org empty?" check
+    fails open on a backend hiccup."""
+    print("rows() and the two kinds of not-found:")
+    client = server.HotdataClient("dbid-test")
+
+    def raising(status, text):
+        class Err(Exception):
+            pass
+        e = Err(f"({status}) Reason: {text}")
+        e.status = status
+        def sql(query, timeout=None):
+            raise e
+        return sql
+
+    client.sql = raising(400, "Bad Request | table not found")
+    assert client.rows("SELECT 1") == [], "a 400 not-found is an empty table"
+    print("    400 'not found' -> []")
+    client.sql = raising(400, "relation has no data")
+    assert client.rows("SELECT 1") == []
+    print("    400 'has no data' -> []")
+    for status, text in ((404, "Not Found"), (500, "not found upstream"),
+                         (None, "not found")):
+        client.sql = raising(status, text)
+        try:
+            client.rows("SELECT 1")
+        except Exception as e:
+            assert getattr(e, "status", None) == status
+            print(f"    {status} {text!r} -> raised")
+        else:
+            raise AssertionError(f"{status} {text!r} must propagate")
+
+
 def test_concurrent_first_use_builds_one_client():
     """gather() is the first thing to reach a cold client, on several threads
     at once. Unlocked, each sees None and builds its own ApiClient; all but the

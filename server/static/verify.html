@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>hototel - confirm your email</title>
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="/static/icon.svg">
+  <link rel="stylesheet" href="/static/auth.css">
+</head>
+<body>
+  <div class="login-wrap">
+    <div class="login-card">
+      <div class="brandrow">
+        <img class="mark" src="/static/icon.svg" width="22" height="22" alt="">
+        <h1>hototel</h1>
+      </div>
+      <div class="sub">Confirm your email</div>
+      <div class="err" id="err">{{ERROR}}</div>
+      <div class="hint" id="msg">{{MSG}}</div>
+
+      <p class="devtext">We sent a link to <b>{{EMAIL}}</b>. Open it in this
+        browser, while signed in here, to continue.</p>
+
+      <form method="post" action="/verify/resend">
+        <button class="signin" type="submit">Send a new link</button>
+      </form>
+
+      <div class="alt">Wrong address? <a href="/logout">Sign out</a> and register again.</div>
+    </div>
+  </div>
+  <script>
+    var err = document.getElementById('err');
+    if (err.textContent.trim()) err.classList.add('show');
+    var msg = document.getElementById('msg');
+    if (msg.textContent.trim()) msg.classList.add('show');
+  </script>
+</body>
+</html>

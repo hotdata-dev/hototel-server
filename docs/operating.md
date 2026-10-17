@@ -18,7 +18,7 @@ isolated rather than filtered out of a shared table.
 ```bash
 uv venv && uv pip install hotdata duckdb
 export HOTDATA_API_KEY=<workspace key>             # or ~/.hotdata/hotdata.json
-export HOTUSAGE_INGEST_TOKEN=<shared secret>       # unset = dev mode (accepts all)
+export HOTUSAGE_INGEST_TOKEN=<any secret>          # unset = dev mode (accepts all)
 .venv/bin/python server/server.py --host 0.0.0.0 --port 8377
 ```
 
@@ -78,9 +78,46 @@ unknown scope fails the approval outright, rather than minting a token for
 different powers than the page just described to the person clicking Approve.
 
 **Per-user tokens identify their owner**: ingest signed in as someone reports as
-that account whatever the payload claims. The shared `HOTUSAGE_INGEST_TOKEN`
-still works but only *admits* — anyone holding it can report as any registered
-colleague — so prefer sign-in.
+that account whatever the payload claims. `HOTUSAGE_INGEST_TOKEN` being set is
+what makes a token required at all; the value itself is **not** accepted as a
+credential unless `HOTUSAGE_ALLOW_SHARED_INGEST=1`, because it only *admits* —
+anyone holding it could report as any registered colleague in any organization.
+Leave that off in production.
+
+## Email verification
+
+A registered address is a *claim* until a link mailed to it is opened while
+signed in as that account. Until then the account sees nothing (every page
+bounces to `/verify`, every `/api/` call and ingest is a 403), and anyone else
+may register the same address over it — new password, old sessions revoked —
+so an address cannot be squatted ahead of its owner. This is also what makes a
+domain-restricted team link mean something: without it, anyone holding the link
+could type any `@yourdomain` address and read the organization.
+
+The link only counts together with the session on purpose. It lands in the
+mailbox whoever registered the address; if the click alone verified, a stranger
+could register your address, wait for you to click the mail, and end up with a
+verified account under your name.
+
+Mail goes out through a transactional mail API key and a From address on a
+domain that provider has verified for you. Both are required or verification
+is **off** (the server says so at boot, and then behaves exactly as before this
+feature existed):
+
+```bash
+export RESEND_API_KEY=<mail API key>
+export HOTUSAGE_EMAIL_FROM="hototel <no-reply@mail.example.com>"
+```
+
+Accounts created before `AuthStore.VERIFICATION_SINCE` (the moment this
+shipped) are trusted as they were. A person whose mail never arrives can be
+vouched for by an operator:
+
+```bash
+server.py markverified jane@acme.com
+```
+
+Links live 24 hours; resends are rate limited per IP.
 
 ## Platform operators (system admins)
 
@@ -114,6 +151,7 @@ server.py resetpw jane@acme.com              # prints new password
 server.py deluser jane@acme.com              # + revokes their logins and machines
 server.py makeadmin jane@acme.com            # org admin (unadmin to demote)
 server.py makesysadmin jane@acme.com         # platform operator (unsysadmin to revoke)
+server.py markverified jane@acme.com         # vouch for a mailbox whose link never arrived
 
 # invites and signed-in machines
 server.py listinvites                     # both kinds, with uses + days left

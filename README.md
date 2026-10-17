@@ -53,7 +53,9 @@ emailed:
 You can restrict a team link to an email domain and cap how many times it is
 used; it expires after 30 days by default, 90 at most. **Restrict it to your
 domain unless you are sharing it privately** — anyone holding an open link can
-join and read your organization's usage.
+join and read your organization's usage. Every new account has to confirm its
+email address before it can see or report anything, so a restricted link really
+does admit only people who can read mail at your domain.
 
 **Managing members.** Promote or demote admins, and remove people. Removing
 someone revokes their logins and their machines; usage they already reported

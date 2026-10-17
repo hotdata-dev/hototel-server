@@ -294,7 +294,7 @@ async function load() {
   clearPlaceholders();  // anything that throws below must not leave them pulsing
   window.setViewer(state.viewer.email, state.org.name);
   $('#orgName').value = state.org.name;
-  $('#orgMeta').textContent = `slug ${state.org.slug} - database ${state.org.database || 'none'}`;
+  $('#orgMeta').textContent = `slug ${state.org.slug}`;
   const admin = state.viewer.isAdmin;
   $('#readonly').hidden = admin;
   $('#orgName').disabled = !admin;

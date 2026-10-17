@@ -217,6 +217,74 @@ def test_the_api_is_not_gated():
     print(f"    /api/status {resp.status}, answered normally")
 
 
+def test_an_unverified_invitee_accepts_their_own_invite_without_a_password():
+    """bob registers and has not opened his mail yet when an admin sends him a
+    single-use invite. Signed in as bob, the page is in join mode (no
+    password field), and the POST must be a plain join: the session already
+    proved the password. Before this, the handler demanded a password the
+    page never showed, so the invite was unacceptable. A stranger holding
+    the link still has to set a password (and take the claim over)."""
+    print("unverified invitee, signed in, accepts without a password:")
+    ada = signed_up("ada-inv@x.dev", "Invite Co")
+    org = AUTH.user_for_token(ada.cookies["hotusage_session"])["org_slug"]
+    AUTH.verification = True
+    try:
+        server.Handler._rate.clear()
+        bob = Browser()
+        bob.go("/register", {"email": "bob-inv@x.dev", "password": "hunter2hunter2"})
+        assert bob.cookies.get("hotusage_session"), "bob has no session"
+        assert not AUTH.is_verified("bob-inv@x.dev")
+        token = AUTH.create_invite("bob-inv@x.dev", org, "ada-inv@x.dev")
+        status, _, page = bob.go(f"/invite/{token}")
+        assert status == 200 and b'data-mode="join"' in page, (status, page[:300])
+        status, loc, _ = bob.go(f"/invite/{token}", {})
+        assert status == 302 and loc == "/", (status, loc)
+        assert org in AUTH.memberships("bob-inv@x.dev"), AUTH.memberships("bob-inv@x.dev")
+        assert AUTH.user_for_token(bob.cookies["hotusage_session"]), "bob was signed out"
+        print("    join mode, 302 to /, member, still signed in")
+
+        AUTH.create_account("carol-inv@x.dev", "hunter2hunter2")  # unverified claim
+        token = AUTH.create_invite("carol-inv@x.dev", org, "ada-inv@x.dev")
+        stranger = Browser()
+        status, _, page = stranger.go(f"/invite/{token}")
+        assert b'data-mode="new"' in page, page[:300]
+        status, loc, _ = stranger.go(f"/invite/{token}", {})
+        assert status == 302 and "err=password" in (loc or ""), (status, loc)
+        print("    a stranger sees the password field and is refused without one")
+    finally:
+        AUTH.verification = False
+
+
+def test_an_unverified_member_joins_through_a_team_link_without_a_password():
+    """Same person, reusable team link: signed in and unverified, bob types
+    his own address and leaves the password blank as the page tells him to.
+    That must be a plain join that keeps his session, not a takeover of his
+    own account (which would set whatever he typed as the password, since
+    the handler no longer length-checks it, and sign him out)."""
+    print("unverified member, signed in, joins through a team link:")
+    ada = signed_up("ada-team@x.dev", "Team Co")
+    org = AUTH.user_for_token(ada.cookies["hotusage_session"])["org_slug"]
+    AUTH.verification = True
+    try:
+        server.Handler._rate.clear()
+        bob = Browser()
+        bob.go("/register", {"email": "bob-team@x.dev", "password": "hunter2hunter2"})
+        session = bob.cookies.get("hotusage_session")
+        assert session and not AUTH.is_verified("bob-team@x.dev")
+        link = AUTH.create_team_invite(org, "ada-team@x.dev")
+        status, loc, _ = bob.go(f"/invite/{link}", {"email": "bob-team@x.dev", "password": ""})
+        assert status == 302 and loc == "/", (status, loc)
+        assert org in AUTH.memberships("bob-team@x.dev"), AUTH.memberships("bob-team@x.dev")
+        assert AUTH.user_for_token(session), "bob was signed out"
+        assert AUTH.login("bob-team@x.dev", "hunter2hunter2"), "password changed"
+        # and a short password typed anyway is not installed as his new one
+        status, loc, _ = bob.go(f"/invite/{link}", {"email": "bob-team@x.dev", "password": "a"})
+        assert AUTH.login("bob-team@x.dev", "a") is None, "a 1-char password took over"
+        print("    302 to /, member, session and password intact")
+    finally:
+        AUTH.verification = False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
