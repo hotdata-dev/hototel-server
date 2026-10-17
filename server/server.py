@@ -2669,6 +2669,9 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 self._json(self.insights.chat(
                     viewer["database_id"], viewer.get("org_name"), history))
+            except insights.ModelStarting:
+                # not a failure: the page waits and sends the question again
+                self._json({"error": "the model is starting up", "starting": True}, 503)
             except ValueError as e:
                 self._json({"error": str(e)}, 400)
             except Exception as e:
@@ -3074,6 +3077,9 @@ class Handler(BaseHTTPRequestHandler):
                 # packages or a model key explains itself instead of 503ing
                 who = {"email": viewer["email"], "org": viewer.get("org_name")}
                 if self.insights:
+                    # opening the page is the moment to wake a scaled-to-zero
+                    # model, so it is booting while the person reads or types
+                    self.insights.warm()
                     self._json({**self.insights.status(), "viewer": who})
                 else:
                     self._json({"enabled": False, "viewer": who,

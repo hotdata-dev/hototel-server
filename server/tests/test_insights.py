@@ -109,10 +109,18 @@ class FakeEngine:
     def __init__(self):
         self.chats = []
 
+    starting = False
+
     def status(self):
-        return {"enabled": True, "model": self.model_name, "windowDays": 30}
+        return {"enabled": True, "model": self.model_name, "windowDays": 30,
+                "modelState": "starting" if self.starting else "ready"}
+
+    def warm(self):
+        pass
 
     def chat(self, database_id, org_name, history):
+        if self.starting:
+            raise insights.ModelStarting()
         self.chats.append((database_id, org_name, history))
         return {"answer": f"**{org_name}**: {len(history)} turns",
                 "steps": [{"tool": "hotdata_execute_sql", "sql": "SELECT 1", "rows": 1,
@@ -191,6 +199,46 @@ def test_chat_runs_for_a_signed_in_member():
         print("    takeaways: fresh=1 reaches the engine")
     finally:
         server.Handler.insights = None
+
+
+def test_a_cold_model_is_a_503_the_page_can_wait_on():
+    """The Modal endpoint scales to zero and refuses with 503 while a
+    container boots. That must reach the page as 'starting', not as the
+    generic failure, so it can wait and resend instead of giving up."""
+    engine = FakeEngine()
+    engine.starting = True
+    server.Handler.insights = engine
+    try:
+        status, raw = call(BASE, "/api/insights/status", headers=AS_ADA)
+        assert status == 200 and json.loads(raw)["modelState"] == "starting", raw[:200]
+        status, raw = call(BASE, "/api/insights/chat", method="POST", headers=AS_ADA,
+                           body={"messages": [{"role": "user", "content": "who?"}]})
+        d = json.loads(raw)
+        assert status == 503 and d.get("starting") is True, (status, d)
+        assert engine.chats == [], "nothing ran"
+        print("cold model: status says starting, chat is a 503 with starting=true")
+    finally:
+        server.Handler.insights = None
+
+
+def test_the_engine_tells_a_cold_start_from_a_failure():
+    """model_state probes /health beside /v1 and caches briefly; a 503 from
+    the client is a cold start, anything else is an error."""
+    eng = insights.InsightsEngine.__new__(insights.InsightsEngine)
+    eng.base_url = "http://127.0.0.1:9/v1"   # nothing listens: the probe fails fast
+    eng._lock = __import__("threading").Lock()
+    eng._health = (None, 0.0)
+    assert eng.model_state() == "starting"
+    eng._health = (True, __import__("time").time())
+    assert eng.model_state() == "ready", "a fresh positive probe is trusted"
+    eng.base_url = ""
+    assert eng.model_state() == "ready", "a hosted API is always up"
+
+    class Err(Exception):
+        status_code = 503
+    assert insights.InsightsEngine._is_cold_start(Err())
+    assert not insights.InsightsEngine._is_cold_start(RuntimeError("x"))
+    print("engine: unreachable endpoint -> starting; cached ready -> ready; 503 is a cold start")
 
 
 def test_chat_refuses_everyone_but_a_cookie_session():

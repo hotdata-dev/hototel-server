@@ -144,9 +144,20 @@ export HOTOTEL_INSIGHTS_API_KEY=<the same random string>
 
 `modal run modal/hototel_llm.py` waits for the server and sends one test
 request with a tool attached, which is the quickest way to confirm tool
-calling works after a model change. The first request after idle waits a
-minute or two for the cold start; the very first ever boot also downloads
+calling works after a model change. The very first ever boot also downloads
 the weights (~60GB) into the `hototel-hf-cache` volume.
+
+**Cold starts.** The container stops ten minutes after the last request, and
+Modal's endpoint answers `503 no upstreams available` while a new one boots
+(about three minutes with the weights cached); that first refused request is
+what starts it. The server treats that 503 as "starting", not as a failure:
+opening the Insights page probes `/health` to wake the model, `/api/insights/
+status` reports `modelState` (`ready`/`starting`), a chat during the boot is a
+503 with `starting: true` that the page waits out (polling status every ten
+seconds, up to eight minutes) before sending the question again, and the
+takeaways thread simply waits for `ready` before running. Keeping one
+container always on (`min_containers=1` on the Modal class) would remove the
+wait at roughly the cost of an H100 around the clock.
 
 The alternative is the **Anthropic API**: leave `HOTOTEL_INSIGHTS_BASE_URL`
 unset and set `ANTHROPIC_API_KEY`; the model defaults to `claude-opus-5-5`.
