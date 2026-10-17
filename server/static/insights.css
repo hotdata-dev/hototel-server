@@ -1,0 +1,105 @@
+/* Insights page: takeaway cards and the chat thread. Tokens come from app.css. */
+.muted { color: var(--ink-2); font-size: 12.5px; }
+.lede { margin: 0 0 14px; max-width: 70ch; }
+.summary { font-size: 14px; line-height: 1.5; margin: 0 0 16px; max-width: 80ch; }
+.summary:empty { display: none; }
+code { font-size: 12px; background: var(--page); border: 1px solid var(--border);
+       border-radius: 4px; padding: 1px 5px; }
+
+/* ---- takeaways: three columns, one per kind ----
+   The kind colour is a dot and a hairline, not a filled card: the column's
+   heading already says which kind it is, and three full washes of colour
+   would make the page read as a status board rather than a set of findings.
+   good borrows --ok, valuable --s-out (the UI's accent), redundant --stale:
+   none of the three is a chart series on this page. */
+.takecols { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.takecol h3 { font-size: 13.5px; font-weight: 650; margin: 0; display: flex;
+              align-items: center; gap: 7px; }
+.kinddot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.takecol[data-kind="good"] { --kind: var(--ok); }
+.takecol[data-kind="valuable"] { --kind: var(--s-out); }
+.takecol[data-kind="redundant"] { --kind: var(--stale); }
+.takecol .kinddot { background: var(--kind); }
+.kindsub { color: var(--muted); font-size: 11.5px; margin: 2px 0 10px; }
+.takelist { display: flex; flex-direction: column; gap: 10px; }
+.take { background: var(--page); border: 1px solid var(--border); border-left: 2px solid var(--kind);
+        border-radius: 8px; padding: 10px 12px; }
+.take h4 { font-size: 13px; font-weight: 600; margin: 0 0 4px; }
+.take p { font-size: 12.5px; line-height: 1.45; margin: 0 0 6px; color: var(--ink); }
+.take .evidence { color: var(--ink-2); font-size: 12px; font-variant-numeric: tabular-nums;
+                  border-top: 1px solid var(--grid); padding-top: 6px; margin: 6px 0 0; }
+.take .who { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.take .who span { font-size: 11px; color: var(--ink-2); background: var(--surface);
+                  border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px;
+                  max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.takelist .empty { padding: 12px 0; font-size: 12.5px; }
+.take.skel-take { height: 96px; border-left-color: var(--border); }
+
+/* pending state: a line under the heading, not a spinner over the page */
+#takeMeta { font-variant-numeric: tabular-nums; }
+
+/* ---- the queries behind an answer ---- */
+.steps { margin-top: 14px; }
+.steps summary { cursor: pointer; color: var(--ink-2); font-size: 12.5px; user-select: none; }
+.steps summary:hover { color: var(--ink); }
+.stepsbody { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+.step { background: var(--page); border: 1px solid var(--border); border-radius: 8px;
+        padding: 8px 10px; font-size: 12px; }
+.step .stephead { display: flex; gap: 10px; color: var(--muted); margin-bottom: 4px;
+                  font-variant-numeric: tabular-nums; }
+.step .stephead .spacer { flex: 1; }
+.step .steperr { color: var(--danger); }
+.step pre { margin: 0; white-space: pre-wrap; word-break: break-word;
+            font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--ink); }
+
+/* ---- chat ---- */
+.suggest { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+.suggest[hidden] { display: none; }
+.suggest button { background: var(--page); color: var(--ink-2); border: 1px solid var(--border);
+                  border-radius: 999px; padding: 5px 12px; font: inherit; font-size: 12.5px;
+                  cursor: pointer; text-align: left; }
+.suggest button:hover { color: var(--ink); }
+.thread { display: flex; flex-direction: column; gap: 12px; }
+.thread:empty { display: none; }
+.msg { max-width: 80ch; }
+.msg.user { align-self: flex-end; background: var(--page); border: 1px solid var(--border);
+            border-radius: 12px 12px 3px 12px; padding: 8px 12px; font-size: 13.5px;
+            white-space: pre-wrap; word-break: break-word; }
+.msg.assistant { align-self: stretch; max-width: none; padding: 2px 0 2px 12px;
+                 border-left: 2px solid var(--grid); }
+.msg.assistant .body { font-size: 13.5px; line-height: 1.5; }
+.msg.assistant .body > :first-child { margin-top: 0; }
+.msg.assistant .body > :last-child { margin-bottom: 0; }
+.msg .body p { margin: 0 0 8px; }
+.msg .body ul, .msg .body ol { margin: 0 0 8px; padding-left: 22px; }
+.msg .body li { margin: 2px 0; }
+.msg .body h1, .msg .body h2, .msg .body h3 { font-size: 13.5px; font-weight: 650; margin: 10px 0 4px; }
+.msg .body table { border-collapse: collapse; font-size: 12.5px; margin: 4px 0 10px; }
+.msg .body th { text-align: left; color: var(--muted); font-weight: 500; font-size: 12px;
+                padding: 4px 10px 4px 0; border-bottom: 1px solid var(--grid); }
+.msg .body td { padding: 4px 10px 4px 0; border-bottom: 1px solid var(--grid);
+                font-variant-numeric: tabular-nums; }
+.msg .body pre { background: var(--page); border: 1px solid var(--border); border-radius: 8px;
+                 padding: 8px 10px; overflow-x: auto; margin: 4px 0 10px;
+                 font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.msg.pending .body { color: var(--muted); }
+.msg.pending .body::after { content: ""; display: inline-block; width: 1em; text-align: left;
+                            animation: dots 1.2s steps(4, end) infinite; }
+@keyframes dots { 0% { content: ""; } 25% { content: "."; } 50% { content: ".."; } 75% { content: "..."; } }
+@media (prefers-reduced-motion: reduce) { .msg.pending .body::after { animation: none; content: "..."; } }
+.msg .steps { margin-top: 8px; }
+
+.ask { display: flex; gap: 8px; align-items: flex-end; margin-top: 14px; }
+.ask textarea { flex: 1; resize: vertical; min-height: 44px; background: var(--page); color: var(--ink);
+                border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px;
+                font: inherit; font-size: 13.5px; }
+.ask button { flex: none; }
+#chatErr { margin-top: 10px; }
+
+@media (max-width: 760px) {
+  .takecols { grid-template-columns: 1fr; }
+  .msg.user { max-width: 100%; }
+}
+@media (pointer: coarse) {
+  .suggest button { padding: 9px 14px; }
+}
