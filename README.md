@@ -40,6 +40,27 @@ Use them to compare people, projects and trends; for actual spend see the spend
 report at `claude.ai/admin-settings/usage`, which exports per-user cost as a
 daily CSV.
 
+## Insights
+
+The **Insights** page, linked from the header, is the dashboard you can talk
+to. Ask a question in plain words &mdash; *who worked on the billing service
+this month?*, *which sessions burned context without producing anything?*
+&mdash; and a model answers it by running SQL against your organization's
+usage, listing every query it ran under the answer so a number can be checked
+rather than trusted.
+
+Above the chat, **Takeaways** is the same analyst's read of the last 30 days,
+sorted into three columns: **good work** (practices worth spreading),
+**valuable** (where the effort concentrates and appears to pay off) and
+**redundant** (duplication or waste worth a look). It regenerates on demand
+and otherwise every six hours.
+
+The model only ever sees your organization's database, and only members
+signed in to the dashboard can ask. On hototel.com the model is an open-weight
+one hototel runs itself, so your usage is not sent to a third-party AI
+provider. The page is off until the operator connects a model, and says so
+when it is.
+
 ## Running an organization
 
 Everything is on the **Organization** page, linked from the header.

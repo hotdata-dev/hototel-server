@@ -119,6 +119,65 @@ server.py markverified jane@acme.com
 
 Links live 24 hours; resends are rate limited per IP.
 
+## Insights (the chat page)
+
+`/insights` is a LangChain agent built with
+[hotdata-langchain](https://github.com/hotdata-dev/hotdata-langchain), in
+`server/insights.py`. It gets two tools -- run SQL, describe tables -- both
+built with `database_id=` set to the viewer's org database, so the scope is
+fixed before the model sees a prompt and the SQL tool's only argument is the
+query. The instant-database tools (list, create, load) are not registered; the
+agent cannot write or reach another organization.
+
+It needs a model. The default deployment is hototel's **own model on Modal**:
+`modal/hototel_llm.py` serves Qwen3-30B-A3B-Instruct-2507 behind vLLM's
+OpenAI-compatible API on one H100, scaling to zero after ten idle minutes, so
+usage rows never leave the company's own accounts. Deploy it once and hand the
+server its URL and key:
+
+```bash
+modal secret create hototel-llm HOTOTEL_LLM_API_KEY=<random string>
+modal deploy modal/hototel_llm.py          # prints the endpoint URL
+export HOTOTEL_INSIGHTS_BASE_URL=https://<workspace>--hototel-server.<region>.modal.direct/v1
+export HOTOTEL_INSIGHTS_API_KEY=<the same random string>
+```
+
+`modal run modal/hototel_llm.py` waits for the server and sends one test
+request with a tool attached, which is the quickest way to confirm tool
+calling works after a model change. The first request after idle waits a
+minute or two for the cold start; the very first ever boot also downloads
+the weights (~60GB) into the `hototel-hf-cache` volume.
+
+The alternative is the **Anthropic API**: leave `HOTOTEL_INSIGHTS_BASE_URL`
+unset and set `ANTHROPIC_API_KEY`; the model defaults to `claude-opus-5-5`.
+Either way `HOTOTEL_INSIGHTS_MODEL` overrides the model name (on Modal the
+server answers to the alias `hototel`) and `HOTOTEL_INSIGHTS=0` forces the
+page off. `/api/insights/status` says which provider is active or what is
+missing. The packages (`hotdata-langchain[agents]`, `langchain-openai`,
+`langchain-anthropic`) are in the Docker image.
+
+Two endpoints, both cookie-session only -- deliberately not in
+`READ_TOKEN_PATHS`, since a read token was approved to pull numbers, not to
+start paid model runs:
+
+- `POST /api/insights/chat` takes the whole transcript (`messages`, user and
+  assistant turns only, at most 24 of them) and returns the answer plus the
+  queries the agent ran. The server keeps no conversation state.
+- `GET /api/insights/takeaways` returns the cached 30-day analysis for the
+  org, or `status: pending` while one generates in a background thread; the
+  page polls. `?fresh=1` starts a new run. The cache is in-process, so a
+  restart (or a second App Runner instance) regenerates on first view.
+
+Both count against one per-IP limit (`Handler.CHAT_RATE_LIMIT`, 60 runs an
+hour), and at most four agent runs execute at once per process so a burst of
+questions cannot take the thread pool away from `/ingest`. A chat holds its
+HTTP request open for the run, typically 20-90 seconds.
+
+On Modal the cost is GPU time while a container is up (an H100 is a few
+dollars an hour, and it stops ten minutes after the last request); on the
+Anthropic API a chat run is a few dollars of tokens at most and a takeaways
+run somewhat more. Nothing here prices anything or writes to hotdata.
+
 ## Platform operators (system admins)
 
 Creating or deleting an organization provisions or strands a hotdata database,

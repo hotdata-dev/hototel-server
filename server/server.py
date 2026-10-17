@@ -55,6 +55,8 @@ import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import core  # noqa: E402
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import insights  # noqa: E402
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 
@@ -1910,6 +1912,8 @@ class Handler(BaseHTTPRequestHandler):
     # must carry a per-user token. HOTUSAGE_ALLOW_SHARED_INGEST=1 turns it on.
     allow_shared = False
     mailer = None      # ResendMailer, or None when verification is off
+    insights = None    # insights.InsightsEngine, or None when the page is off
+    CHAT_RATE_LIMIT = 60   # agent runs per IP per hour: each one is a paid model call
     VERIFY_RATE_LIMIT = 5   # resends per IP per hour
     max_body = 64 * 1024 * 1024
 
@@ -2640,6 +2644,37 @@ class Handler(BaseHTTPRequestHandler):
                 print(f"error: {path}: {e}", file=sys.stderr)
                 self._json({"error": "that did not work"}, 500)
             return
+        if path == "/api/insights/chat":
+            # Cookie session only -- deliberately not a READ_TOKEN path. A read
+            # token is minted for a machine to pull numbers; letting it drive
+            # a paid model run is a different grant than the approval page
+            # described.
+            try:
+                viewer = self._viewer()
+                if not viewer:
+                    self._json({"error": "unauthorized"}, 401)
+                    return
+                if self._gated_on_verify(viewer, path):
+                    return
+                if not self.insights:
+                    self._json({"error": "insights are not enabled on this server"}, 503)
+                    return
+                if not viewer.get("database_id"):
+                    self._json({"error": "you do not belong to an organization yet"}, 409)
+                    return
+                body = self._read_json(limit=256 * 1024)
+                history = insights.validate_history(body.get("messages"))
+                if self._rate_limited("chat", limit=self.CHAT_RATE_LIMIT):
+                    self._json({"error": "too many questions this hour; try again later"}, 429)
+                    return
+                self._json(self.insights.chat(
+                    viewer["database_id"], viewer.get("org_name"), history))
+            except ValueError as e:
+                self._json({"error": str(e)}, 400)
+            except Exception as e:
+                print(f"error: /api/insights/chat: {e}", file=sys.stderr)
+                self._json({"error": "the analysis did not finish; try again"}, 500)
+            return
         if path == "/api/switch-org":
             try:
                 viewer = self._viewer()
@@ -3017,6 +3052,29 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/" or path == "/index.html":
                 self._static("index.html")
+            elif path == "/insights":
+                self._static("insights.html")
+            elif path == "/api/insights/status":
+                # the page asks this first, so a server without the optional
+                # packages or a model key explains itself instead of 503ing
+                who = {"email": viewer["email"], "org": viewer.get("org_name")}
+                if self.insights:
+                    self._json({**self.insights.status(), "viewer": who})
+                else:
+                    self._json({"enabled": False, "viewer": who,
+                                "reason": insights.InsightsEngine.missing_requirements()})
+            elif path == "/api/insights/takeaways":
+                if not self.insights:
+                    self._json({"error": "insights are not enabled on this server"}, 503)
+                elif not viewer.get("database_id"):
+                    self._json({"error": "no org database"}, 409)
+                else:
+                    # fresh=1 starts a new model run, so it is the one GET here
+                    # that spends money; charge it against the chat bucket
+                    if fresh and self._rate_limited("chat", limit=self.CHAT_RATE_LIMIT):
+                        fresh = False
+                    self._json(self.insights.takeaways(
+                        viewer["database_id"], viewer.get("org_name"), fresh=fresh))
             elif path == "/api/data":
                 db = viewer.get("database_id")
                 days = self._window_days(parsed.query)
@@ -3407,6 +3465,9 @@ def main():
               "is OFF: any address can register and no mailbox is ever proved",
               file=sys.stderr)
     Handler.token = token
+    Handler.insights = insights.InsightsEngine.from_env()
+    if Handler.insights:
+        print(f"hototel server: insights page ON, model {Handler.insights.model_name}")
     Handler.allow_shared = os.environ.get("HOTUSAGE_ALLOW_SHARED_INGEST") == "1"
     if Handler.allow_shared:
         print("warn: HOTUSAGE_ALLOW_SHARED_INGEST=1 - the shared token can report "
