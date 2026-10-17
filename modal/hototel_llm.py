@@ -103,9 +103,13 @@ class Server:
             "--host", "0.0.0.0", "--port", str(VLLM_PORT),
             "--uvicorn-log-level=info",
             "--tensor-parallel-size", str(N_GPU),
-            # the agent's whole transcript -- system prompt, tool schemas, a
-            # dozen query results -- fits comfortably; more only costs KV cache
-            "--max-model-len", "32768",
+            # The agent's whole transcript -- system prompt, tool schemas and
+            # every query result of the run -- has to fit, plus the answer. A
+            # takeaways run overflowed 32k (25k of prompt once a dozen result
+            # sets were in it, with 8k reserved to answer), so 64k. The model
+            # supports 262k natively; KV cache for 64k is a few GB of the
+            # ~15GB left beside the weights on one H100.
+            "--max-model-len", "65536",
             "--gpu-memory-utilization", "0.92",
             # read the safetensors shards with parallel threads into the page
             # cache before mapping them: the volume is a network filesystem

@@ -96,6 +96,10 @@ How to work:
 - Prefer one well-shaped query (CTEs, window functions, GROUP BY) to many
   small ones. Call describe_tables only when the notes above do not answer a
   schema question.
+- Aggregate in SQL and keep results small: GROUP BY, ORDER BY and LIMIT so a
+  query returns the 10 to 30 rows that answer it, never raw session or
+  request rows and never SELECT *. Everything a query returns stays in your
+  context for the rest of the conversation, and the window is finite.
 - When a question is about "recently" or gives no window, use the last 30
   days and say so.
 - Name people by their email address and projects by their project name, as
@@ -389,9 +393,12 @@ class InsightsEngine:
         OpenAI-compatible endpoint gets the same request either way."""
         if self.base_url:
             from langchain_openai import ChatOpenAI
+            # max_tokens is reserved out of the context window up front, so
+            # it is sized to the longest answer (the takeaways JSON is ~2k),
+            # not to the window: 8000 plus a long transcript overflowed 32k
             return ChatOpenAI(model=self.model_name, base_url=self.base_url,
                               api_key=os.environ["HOTOTEL_INSIGHTS_API_KEY"],
-                              max_tokens=8000, timeout=300, max_retries=2)
+                              max_tokens=4096, timeout=300, max_retries=2)
         from langchain_anthropic import ChatAnthropic
         return ChatAnthropic(model=self.model_name, max_tokens=16000,
                              effort=effort, timeout=300, max_retries=2)
@@ -424,7 +431,10 @@ class InsightsEngine:
             handle_errors=True,          # a bad query costs a turn, not the run
             describe_column_stats=False, # one aggregate per table, rarely useful here
             describe_search_capabilities=False,
-            max_rows=200)
+            # every returned row lives in the transcript until the run ends;
+            # a takeaways run with a dozen 200-row results overflowed the
+            # model's window, and the prompt now asks for 10-30 anyway
+            max_rows=80)
         model = self._model(effort)
         # No system_prompt here: ours carries the org name and today's date,
         # so _run sends it as the first message instead, which the Anthropic
