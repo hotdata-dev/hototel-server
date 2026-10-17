@@ -149,12 +149,13 @@ the weights (~60GB) into the `hototel-hf-cache` volume.
 
 **Cold starts.** The container stops ten minutes after the last request, and
 Modal's endpoint answers `503 no upstreams available` while a new one boots
-(about three minutes with the weights cached); that first refused request is
-what starts it. The server treats that 503 as "starting", not as a failure:
+(about three minutes with the weights cached, and much longer when the volume
+reads slowly -- the class allows thirty and loads the shards with vLLM's
+parallel prefetch); that first refused request is what starts it. The server treats that 503 as "starting", not as a failure:
 opening the Insights page probes `/health` to wake the model, `/api/insights/
 status` reports `modelState` (`ready`/`starting`), a chat during the boot is a
 503 with `starting: true` that the page waits out (polling status every ten
-seconds, up to eight minutes) before sending the question again, and the
+seconds, up to twenty minutes) before sending the question again, and the
 takeaways thread simply waits for `ready` before running. Keeping one
 container always on (`min_containers=1` on the Modal class) would remove the
 wait at roughly the cost of an H100 around the clock.

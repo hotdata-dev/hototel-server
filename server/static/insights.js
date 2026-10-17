@@ -38,11 +38,11 @@ async function api(path, body) {
 
 // The model scales to zero when idle and takes a few minutes to come back.
 // Opening the page wakes it; this waits for the server to say it is ready.
-const STARTING_NOTE = 'Starting the model. This takes two to three minutes after it has been idle';
+const STARTING_NOTE = 'Starting the model. This usually takes a few minutes after it has been idle';
 const sleep = (ms) => new Promise((res) => setTimeout(res, ms));
 
 async function waitForModel(onTick) {
-  const deadline = Date.now() + 8 * 60 * 1000;
+  const deadline = Date.now() + 20 * 60 * 1000;  // matches the server's MODEL_START_TIMEOUT
   while (Date.now() < deadline) {
     const st = await api('/api/insights/status').catch(() => null);
     if (st && st.modelState !== 'starting') return true;

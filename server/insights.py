@@ -255,9 +255,9 @@ class ModelStarting(Exception):
 
 
 # How long a cold start may take before it is treated as an outage. Weights
-# are cached in a volume, so a boot is ~3 minutes; the very first boot after a
-# redeploy with a new model can be much longer, and gets to fail.
-MODEL_START_TIMEOUT = 8 * 60
+# are cached in a volume, so a boot is ~3 minutes when the volume reads well
+# and has been seen to take 15+ when it does not; the Modal class allows 30.
+MODEL_START_TIMEOUT = 20 * 60
 MODEL_HEALTH_TTL = 5
 
 
