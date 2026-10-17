@@ -29,6 +29,7 @@
 
   const PAGES = [
     { id: 'dashboard', href: '/', label: 'Dashboard' },
+    { id: 'insights', href: '/insights', label: 'Insights' },
     { id: 'organization', href: '/admin', label: 'Organization' },
   ];
 
