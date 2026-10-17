@@ -2379,10 +2379,12 @@ class Handler(BaseHTTPRequestHandler):
 
             def established(addr):
                 # an unverified row is a claim, not an account: the acceptor
-                # sets a password and takes it over (see AuthStore.take_over)
+                # sets a password and takes it over (see AuthStore.take_over).
+                # Signed in as the address, the session is the proof instead.
                 addr = (addr or "").strip().lower()
                 return bool(addr and self.auth.get_user(addr)
-                            and self.auth.is_verified(addr))
+                            and (addr == (as_user or "").strip().lower()
+                                 or self.auth.is_verified(addr)))
             joining_existing = established(inv["email"]) if inv \
                 else established(form.get("email", ""))
             if not joining_existing and len(password) < 8:

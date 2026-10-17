@@ -217,6 +217,44 @@ def test_the_api_is_not_gated():
     print(f"    /api/status {resp.status}, answered normally")
 
 
+def test_an_unverified_invitee_accepts_their_own_invite_without_a_password():
+    """bob registers and has not opened his mail yet when an admin sends him a
+    single-use invite. Signed in as bob, the page is in join mode (no
+    password field), and the POST must be a plain join: the session already
+    proved the password. Before this, the handler demanded a password the
+    page never showed, so the invite was unacceptable. A stranger holding
+    the link still has to set a password (and take the claim over)."""
+    print("unverified invitee, signed in, accepts without a password:")
+    ada = signed_up("ada-inv@x.dev", "Invite Co")
+    org = AUTH.user_for_token(ada.cookies["hotusage_session"])["org_slug"]
+    AUTH.verification = True
+    try:
+        server.Handler._rate.clear()
+        bob = Browser()
+        bob.go("/register", {"email": "bob-inv@x.dev", "password": "hunter2hunter2"})
+        assert bob.cookies.get("hotusage_session"), "bob has no session"
+        assert not AUTH.is_verified("bob-inv@x.dev")
+        token = AUTH.create_invite("bob-inv@x.dev", org, "ada-inv@x.dev")
+        status, _, page = bob.go(f"/invite/{token}")
+        assert status == 200 and b'data-mode="join"' in page, (status, page[:300])
+        status, loc, _ = bob.go(f"/invite/{token}", {})
+        assert status == 302 and loc == "/", (status, loc)
+        assert org in AUTH.memberships("bob-inv@x.dev"), AUTH.memberships("bob-inv@x.dev")
+        assert AUTH.user_for_token(bob.cookies["hotusage_session"]), "bob was signed out"
+        print("    join mode, 302 to /, member, still signed in")
+
+        AUTH.create_account("carol-inv@x.dev", "hunter2hunter2")  # unverified claim
+        token = AUTH.create_invite("carol-inv@x.dev", org, "ada-inv@x.dev")
+        stranger = Browser()
+        status, _, page = stranger.go(f"/invite/{token}")
+        assert b'data-mode="new"' in page, page[:300]
+        status, loc, _ = stranger.go(f"/invite/{token}", {})
+        assert status == 302 and "err=password" in (loc or ""), (status, loc)
+        print("    a stranger sees the password field and is refused without one")
+    finally:
+        AUTH.verification = False
+
+
 if __name__ == "__main__":
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:
