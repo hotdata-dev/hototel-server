@@ -16,7 +16,7 @@ isolated rather than filtered out of a shared table.
 ## Running it
 
 ```bash
-uv venv && uv pip install hotdata duckdb
+uv venv && uv pip install hotdata 'duckdb>=1.4.2'
 export HOTDATA_API_KEY=<workspace key>             # or ~/.hotdata/hotdata.json
 export HOTUSAGE_INGEST_TOKEN=<any secret>          # unset = dev mode (accepts all)
 .venv/bin/python server/server.py --host 0.0.0.0 --port 8377
